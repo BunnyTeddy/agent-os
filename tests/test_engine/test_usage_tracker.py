@@ -10,7 +10,7 @@ from agentos.engine.pricing import (
     reset_live_price_cache_for_tests,
     seed_opencap_price_cache,
 )
-from agentos.engine.usage import ModelUsage, SessionUsage, UsageTracker
+from agentos.engine.usage import ModelUsage, SessionUsage, UsageTracker, parse_session_key_scope
 
 
 @pytest.fixture(autouse=True)
@@ -186,6 +186,45 @@ def test_usage_tracker_isolates_sessions() -> None:
     assert a.cache_write_tokens == 5
     assert b.cache_read_tokens == 70
     assert b.cache_write_tokens == 15
+
+
+def test_session_metadata_cache_preserves_parser_results_and_reuses_hits() -> None:
+    tracker = UsageTracker(max_session_metadata_entries=2)
+    session_key = "agent:trader:telegram:account:peer"
+
+    with patch(
+        "agentos.engine.usage.parse_session_key_scope",
+        wraps=parse_session_key_scope,
+    ) as parse:
+        assert tracker.get_session_scope(session_key) == ("trader", "telegram")
+        assert tracker.get_session_scope(session_key) == ("trader", "telegram")
+
+    assert parse.call_count == 1
+
+
+def test_session_metadata_cache_hits_refresh_lru_recency() -> None:
+    tracker = UsageTracker(max_session_metadata_entries=2)
+    first = "agent:first:telegram:account:one"
+    second = "agent:second:webchat:two"
+    third = "agent:third:discord:three"
+
+    assert tracker.get_session_scope(first) == ("first", "telegram")
+    assert tracker.get_session_scope(second) == ("second", "webchat")
+    assert len(tracker._session_metadata) == 2
+
+    assert tracker.get_session_scope(first) == ("first", "telegram")
+    assert tracker.get_session_scope(third) == ("third", "discord")
+
+    assert list(tracker._session_metadata) == [first, third]
+
+
+def test_session_metadata_cache_normalizes_non_positive_capacity() -> None:
+    tracker = UsageTracker(max_session_metadata_entries=0)
+
+    tracker.get_session_scope("agent:first:telegram:one")
+    tracker.get_session_scope("agent:second:discord:two")
+
+    assert list(tracker._session_metadata) == ["agent:second:discord:two"]
 
 
 # ---------------------------------------------------------------------------

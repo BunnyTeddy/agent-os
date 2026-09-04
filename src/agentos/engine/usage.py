@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -377,6 +378,7 @@ class UsageTracker:
         db_path: str | None = None,
         *,
         ledger_db_path: str | None = None,
+        max_session_metadata_entries: int = 2000,
     ) -> None:
         """
         ``db_path`` backs the detailed ``usage_records`` history.
@@ -395,7 +397,8 @@ class UsageTracker:
         self._default_provider_id = str(default_provider_id or "").strip().lower()
         self._db_path = db_path
         self._ledger_db_path = ledger_db_path
-        self._session_metadata: dict[str, tuple[str, str]] = {}
+        self._session_metadata: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        self._max_session_metadata_entries = max(1, int(max_session_metadata_entries))
         self._warned_keys: set[str] = set()
         # In-process mirror of the persisted ledger. Reads take the larger of
         # the two: a dropped write (sqlite busy, disk full) must not be able to
@@ -577,6 +580,10 @@ class UsageTracker:
         if meta is None:
             meta = parse_session_key_scope(session_key)
             self._session_metadata[session_key] = meta
+            while len(self._session_metadata) > self._max_session_metadata_entries:
+                self._session_metadata.popitem(last=False)
+        else:
+            self._session_metadata.move_to_end(session_key)
         return meta
 
     def check_budget_limits(self, session_key: str, config: Any) -> tuple[bool, str | None]:
