@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -54,6 +55,12 @@ class ToolCallSignature:
     @property
     def key(self) -> tuple[str, str]:
         return (self.tool_name, self.arguments_hash)
+
+
+@dataclass(frozen=True)
+class _RepeatState:
+    result_hash: str
+    count: int
 
 
 def tool_call_signature(
@@ -103,6 +110,7 @@ class ProgressWatchdog:
         repeated_provider_failure_threshold: int = 2,
         repeated_tool_call_threshold: int = 3,
         observe_only: bool = True,
+        max_repeat_entries: int = 1000,
     ) -> None:
         self.repeated_tool_error_threshold = repeated_tool_error_threshold
         self.repeated_provider_failure_threshold = repeated_provider_failure_threshold
@@ -112,8 +120,8 @@ class ProgressWatchdog:
         self._tool_error_count = 0
         self._last_provider_failure: str | None = None
         self._provider_failure_count = 0
-        self._repeat_counts: dict[tuple[str, str], int] = {}
-        self._repeat_results: dict[tuple[str, str], str] = {}
+        self._repeat_states: OrderedDict[tuple[str, str], _RepeatState] = OrderedDict()
+        self._max_repeat_entries = max(1, int(max_repeat_entries))
 
     def observe(self, observation: ProgressObservation) -> ProgressDecision:
         # Checked before the progress test on purpose: a repeated *successful*
@@ -144,14 +152,15 @@ class ProgressWatchdog:
         flagged_count = 0
         for signature in observation.tool_calls:
             key = signature.key
-            previous = self._repeat_results.get(key)
-            if previous is not None and previous == signature.result_hash:
-                self._repeat_counts[key] = self._repeat_counts.get(key, 1) + 1
-            else:
-                # A different answer means the call earned its place.
-                self._repeat_counts[key] = 1
-                self._repeat_results[key] = signature.result_hash
-            count = self._repeat_counts[key]
+            previous = self._repeat_states.pop(key, None)
+            count = (
+                previous.count + 1
+                if previous is not None and previous.result_hash == signature.result_hash
+                else 1
+            )
+            self._repeat_states[key] = _RepeatState(signature.result_hash, count)
+            while len(self._repeat_states) > self._max_repeat_entries:
+                self._repeat_states.popitem(last=False)
             if count >= self.repeated_tool_call_threshold and count > flagged_count:
                 flagged = signature
                 flagged_count = count
@@ -229,6 +238,11 @@ class ProgressWatchdog:
         self._tool_error_count = 0
         self._last_provider_failure = None
         self._provider_failure_count = 0
+
+    def clear(self) -> None:
+        """Reset all accumulated watchdog state."""
+        self._repeat_states.clear()
+        self._reset_progress_sensitive_counts()
 
 
 def guidance_for(decision: ProgressDecision) -> str:

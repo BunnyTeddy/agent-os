@@ -87,6 +87,7 @@ def test_a_changed_result_resets_the_repeat_count() -> None:
     )
 
     assert decision.reason != "repeated_tool_call"
+    assert watchdog._repeat_states[_call("read_file", args, "v2").key].count == 2
 
 
 def test_different_arguments_are_tracked_separately() -> None:
@@ -134,3 +135,66 @@ def test_guidance_is_empty_for_an_ordinary_observation() -> None:
     decision = watchdog.observe(ProgressObservation(iteration=1, successful_tool_result=True))
 
     assert guidance_for(decision) == ""
+
+
+def test_repeat_state_uses_true_lru_recency() -> None:
+    watchdog = ProgressWatchdog(repeated_tool_call_threshold=10, max_repeat_entries=2)
+    first = _call("read_file", {"path": "/first"}, "one")
+    second = _call("read_file", {"path": "/second"}, "two")
+    third = _call("read_file", {"path": "/third"}, "three")
+
+    for iteration, call in enumerate((first, second, first, third), start=1):
+        watchdog.observe(ProgressObservation(iteration=iteration, tool_calls=(call,)))
+
+    assert list(watchdog._repeat_states) == [first.key, third.key]
+    assert watchdog._repeat_states[first.key].count == 2
+
+
+def test_multiple_calls_in_one_observation_keep_the_active_signature() -> None:
+    watchdog = ProgressWatchdog(repeated_tool_call_threshold=10, max_repeat_entries=2)
+    first = _call("read_file", {"path": "/first"}, "one")
+    second = _call("read_file", {"path": "/second"}, "two")
+    third = _call("read_file", {"path": "/third"}, "three")
+
+    watchdog.observe(
+        ProgressObservation(iteration=1, tool_calls=(first, second, first, third))
+    )
+
+    assert list(watchdog._repeat_states) == [first.key, third.key]
+    assert watchdog._repeat_states[first.key].count == 2
+
+
+def test_repeated_tool_call_blocks_when_observe_only_is_disabled() -> None:
+    watchdog = ProgressWatchdog(
+        repeated_tool_call_threshold=2,
+        observe_only=False,
+    )
+    call = _call("read_file", {"path": "/same"}, "unchanged")
+    watchdog.observe(ProgressObservation(iteration=1, tool_calls=(call,)))
+
+    decision = watchdog.observe(ProgressObservation(iteration=2, tool_calls=(call,)))
+
+    assert decision.action == "block"
+    assert decision.reason == "repeated_tool_call"
+    assert decision.details["count"] == 2
+
+
+def test_clear_resets_repeat_and_failure_state() -> None:
+    watchdog = ProgressWatchdog()
+    call = _call("read_file", {"path": "/same"}, "unchanged")
+    watchdog.observe(
+        ProgressObservation(
+            iteration=1,
+            tool_calls=(call,),
+            tool_error_signature="tool-error",
+            provider_failure_signature="provider-error",
+        )
+    )
+
+    watchdog.clear()
+
+    assert watchdog._repeat_states == {}
+    assert watchdog._last_tool_error is None
+    assert watchdog._tool_error_count == 0
+    assert watchdog._last_provider_failure is None
+    assert watchdog._provider_failure_count == 0
