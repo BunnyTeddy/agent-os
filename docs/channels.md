@@ -248,27 +248,24 @@ is mandatory, not advisory: without it the endpoint answers Slack's
 `url_verification` handshake and rejects everything else with `401`, because an
 unsigned POST cannot be attributed to Slack.
 
-Leave `webhook_path` empty or omit it to select the automatic path. One enabled
-Slack webhook account keeps `/slack/events`. With multiple enabled Slack webhook
-accounts, each automatic path is `/slack/events/<account_name>`, for example
-`/slack/events/team-a` and `/slack/events/team-b`. Names, not configuration order,
-determine these paths, so they stay stable across restarts and config reordering.
-Disabled entries and Socket Mode accounts do not affect this choice.
+The default `webhook_path` is `/slack/events`; an empty value uses the same URL.
+Adding or enabling another account keeps existing paths unchanged. Paths remain
+stable across restarts and config reordering.
 
-A non-empty `webhook_path` always overrides the automatic path. You can set it
-with `agentos channels add slack --name team-a --field webhook_path=/slack/team-a/events`
-alongside the token and signing-secret fields above. When adding a second webhook
-account, set `webhook_path=/slack/events` explicitly on the existing account if
-you want to keep its Request URL. Automatic account names must use letters,
-digits, `.`, `_`, `~`, or `-` and cannot be `.` or `..`; otherwise set an explicit
-path. Configure each Slack app's Events API and Interactivity Request URLs to
-use its matching public URL; use the same URL for slash commands
-(`command_request_url` or the exported manifest).
+For multiple Slack webhook accounts, configure a distinct path for each account.
+An existing account can keep `/slack/events` while a new account uses, for example,
+`/slack/events/team-b`. Set the new account's path with
+`agentos channels add slack --name team-b --field webhook_path=/slack/events/team-b`
+alongside the token and signing-secret fields above, or update an existing entry
+with `agentos channels edit team-b --field webhook_path=/slack/events/team-b`.
+Configure each Slack app's Events API and Interactivity Request URLs to use its
+matching public URL; use the same URL for slash commands (`command_request_url`
+or the exported manifest).
 
 Restart the gateway after changing paths. Duplicate channel webhook paths with
-overlapping HTTP methods cause a startup error naming the conflicting entries,
-instead of silently routing every request to the first account. Socket Mode
-does not register a webhook route and is unaffected.
+overlapping HTTP methods cause a startup error naming the conflicting entries
+and the `webhook_path` field to change. Disabled entries and Socket Mode accounts
+do not register webhook routes.
 
 Leave `slack_channel_id` empty when the adapter should reply to the incoming
 conversation. Set it only when you want a default fallback channel. Enable

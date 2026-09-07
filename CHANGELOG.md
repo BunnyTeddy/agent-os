@@ -8,10 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- Multiple Slack webhook accounts use stable account-named URLs by default,
-  preserving `/slack/events` for a single webhook account and explicit
-  `webhook_path` overrides. Conflicting webhook paths are rejected instead of
-  silently routing another account's events to the first adapter.
+- Slack webhook accounts accept a per-account `webhook_path`, defaulting to
+  `/slack/events`. Adding or enabling another account preserves existing URLs;
+  conflicting paths cause a startup error requiring distinct configured paths,
+  instead of silently moving an account or routing its events to another adapter.
   ([#1022](https://github.com/use-agent-os/agent-os/issues/1022))
 
 - Day-of-week ranges that end at `SUN` parse again. `_parse_field` substituted

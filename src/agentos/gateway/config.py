@@ -1754,8 +1754,8 @@ class SlackChannelEntry(ConfiguredChannelEntry):
     token: str
     slack_channel_id: str = ""
     signing_secret: str | None = None
-    # Empty selects /slack/events for one webhook account, otherwise an account-named path.
-    webhook_path: str = ""
+    # Keep the legacy URL regardless of how many webhook accounts are enabled.
+    webhook_path: str = "/slack/events"
     reply_in_thread: bool = False
     # ``socket`` uses Slack Socket Mode (an outbound websocket long-connection)
     # and needs no public Request URL; ``webhook`` keeps the Events API

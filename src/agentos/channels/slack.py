@@ -145,7 +145,7 @@ class SlackChannel:
     _socket_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _socket_stop: asyncio.Event | None = field(default=None, init=False, repr=False)
     supports_slash_commands: bool = True
-    webhook_path: str = ""
+    webhook_path: str = "/slack/events"
 
     @property
     def transport_name(self) -> str:

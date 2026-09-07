@@ -149,17 +149,16 @@ Built-in channel types are `discord`, `email`, `slack`, and `telegram`; use
 `agentos channels types` as the authoritative catalog. Config migration backs up the
 file before removing entries for retired built-in channel types.
 
-Slack webhook entries use `webhook_path`. Omitted or empty means automatic:
-`/slack/events` for one enabled webhook account, or `/slack/events/<account_name>`
-for multiple enabled webhook accounts. Names determine the paths across restarts
-and config reordering; disabled and Socket Mode entries do not count. Non-empty
-paths supplied with `channels add slack --field webhook_path=…` take precedence.
-Set the existing account's path explicitly to `/slack/events` before adding a
-second webhook account if its Request URL must stay unchanged. Automatic names
-must use letters, digits, `.`, `_`, `~`, or `-` and cannot be `.` or `..`; use an
-explicit path for other names. Configure each Slack app's Events API,
-Interactivity, and slash-command Request URLs to match, then restart the gateway.
-Duplicate webhook paths with overlapping HTTP methods cause a startup error.
+Slack webhook entries use `webhook_path` (default `/slack/events`; empty also
+uses this URL). Adding or enabling another account preserves existing URLs.
+Configure a distinct path for each additional webhook account with
+`channels add slack --field webhook_path=…` or
+`channels edit <name> --field webhook_path=…`; for example, a second account can
+use `/slack/events/team-b` while the first keeps `/slack/events`. Configure each
+Slack app's Events API, Interactivity, and slash-command Request URLs to match,
+then restart the gateway. Duplicate webhook paths with overlapping HTTP methods
+cause a startup error naming the entries and field to change. Disabled and
+Socket Mode entries do not register webhook routes.
 
 Telegram direct messages always require pairing. Use `agentos channels pairing
 list <name>`, `approve <name> <code>`, `deny <name> <sender-id>`, or `revoke
