@@ -6046,6 +6046,8 @@ class TurnRunner:
 
         transcript = await self._session_manager.get_transcript(session_key)
 
+        agent.compaction_source_message_ids = [entry.message_id for entry in transcript]
+
         from agentos.engine.history import reconstruct_messages_from_entry
         from agentos.provider import Message
 

@@ -1404,15 +1404,20 @@ class SessionManager:
         summary: str,
         kept_entries: list[dict],
         *,
+        source_message_ids: list[str],
         compaction_id: str | None = None,
         trigger_reason: str | None = None,
         flush_receipt_status: str | None = None,
-    ) -> None:
+    ) -> list[str]:
         """Persist a pre-computed compaction result directly (no LLM re-compaction).
 
         Called by TurnRunner when Agent emits CompactionEvent. Writes the Agent's
         actual compaction output to DB, avoiding the double-compaction bug that
         would occur if we called compact() (which re-reads DB and re-runs LLM).
+
+        Only the supplied source messages belong to the compaction. Other rows
+        are queued follow-ups and survive unchanged. Return the retained source
+        ids for the next inline compaction in the same turn.
         """
         session_key = canonicalize_session_key(session_key)
         import structlog as _structlog
@@ -1421,10 +1426,14 @@ class SessionManager:
 
         node = await self._storage.get_session(session_key)
         if node is None:
-            _log.warning("persist_compaction.session_not_found", session_key=session_key)
-            return
+            raise KeyError(f"Session not found: {session_key}")
 
-        entries = await self._storage.get_transcript(node.session_id)
+        current_entries = await self._storage.get_transcript(node.session_id)
+        source_ids = set(source_message_ids)
+        entries = [entry for entry in current_entries if entry.message_id in source_ids]
+        if [entry.message_id for entry in entries] != source_message_ids:
+            raise ValueError("Inline compaction source transcript changed")
+        queued_entries = [entry for entry in current_entries if entry.message_id not in source_ids]
         removed_entries = entries[: max(0, len(entries) - len(kept_entries))]
         preserved_entries = entries[len(removed_entries) :]
         if removed_entries and not summary:
@@ -1434,7 +1443,7 @@ class SessionManager:
                 removed=len(removed_entries),
                 kept=len(kept_entries),
             )
-            return
+            return source_message_ids
 
         # Store summary out-of-band. New compactions must not prepend a
         # transcript system marker because history loading would make that
@@ -1498,9 +1507,10 @@ class SessionManager:
         await self._storage.rewrite_compacted_session(
             node=node,
             summary=summary_record,
-            entries=rewritten_entries,
+            entries=[*rewritten_entries, *queued_entries],
             context_states=[context_state] if context_state is not None else None,
             archived_entries=removed_entries if summary_record is not None else None,
+            expected_message_ids=[entry.message_id for entry in current_entries],
         )
         _log.info(
             "persist_compaction.done",
@@ -1508,6 +1518,7 @@ class SessionManager:
             summary_len=len(summary),
             kept=len(kept_entries),
         )
+        return [entry.message_id for entry in rewritten_entries]
 
     async def truncate(self, session_key: str, max_messages: int = 20) -> dict:
         """Truncate transcript to the most recent *max_messages* entries.

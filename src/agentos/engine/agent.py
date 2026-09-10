@@ -690,6 +690,9 @@ class Agent:
         self.subagent_manager = subagent_manager or SubagentManager()
         self._usage_tracker = usage_tracker
         self._session_key = session_key
+        # The runner tracks durable messages represented by this turn's history.
+        # Pending follow-ups must not become part of an inline compaction.
+        self.compaction_source_message_ids: list[str] | None = None
         self._turn_call_logger = turn_call_logger
         self._tool_registry: ToolRegistry | None = tool_registry
         self._tool_context: ToolContext | None = tool_context

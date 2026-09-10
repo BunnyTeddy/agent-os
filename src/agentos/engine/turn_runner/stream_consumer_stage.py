@@ -97,12 +97,14 @@ class CompactionPersistPort(Protocol):
     call to remain re-entrant -- the Agent has already mutated its
     in-memory message list before the runner sees ``CompactionEvent``,
     so the DB transcript may have more entries than ``kept_entries``.
-    The stage forwards the call verbatim.
+    The adapter uses the Agent's loaded transcript snapshot to exclude
+    queued follow-ups from the rewrite.
     """
 
     async def persist_and_notify(
         self,
         *,
+        agent: Agent,
         session_key: str,
         summary: str,
         kept_entries: list[Any],
@@ -743,6 +745,7 @@ class _CompactionHandler:
         if inp.session_manager_present:
             try:
                 await self._persist.persist_and_notify(
+                    agent=inp.agent,
                     session_key=inp.session_key,
                     summary=event.summary,
                     kept_entries=event.kept_entries,

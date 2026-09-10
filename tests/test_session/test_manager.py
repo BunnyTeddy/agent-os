@@ -177,6 +177,9 @@ async def test_reset_same_key_archive_preserves_compacted_canonical_transcript(
         "short summary",
         [{"role": "assistant", "content": "latest reply"}],
         compaction_id="cmp_reset_archive",
+        source_message_ids=[
+            entry.message_id for entry in await manager.get_transcript("agent:main:main")
+        ],
     )
 
     canonical_before_reset = [
@@ -456,6 +459,9 @@ async def test_branch_fork_transcript_copies_compacted_archive(manager):
         [{"role": "assistant", "content": "latest reply"}],
         compaction_id="cmp_branch_archive",
         trigger_reason="agent_inline_overflow",
+        source_message_ids=[
+            entry.message_id for entry in await manager.get_transcript("agent:main:main")
+        ],
     )
     parent_canonical = [
         entry.content for entry in await manager.get_canonical_transcript("agent:main:main")
@@ -1168,6 +1174,9 @@ async def test_persist_compaction_result_rewrite_failure_keeps_session_state_ato
             "agent:main:main",
             "short summary",
             [{"role": "assistant", "content": "latest reply"}],
+            source_message_ids=[
+                entry.message_id for entry in await manager.get_transcript("agent:main:main")
+            ],
         )
 
     assert await manager.get_transcript("agent:main:main") == original_transcript
@@ -1196,6 +1205,9 @@ async def test_persist_compaction_result_stores_summary_out_of_band(manager):
         [{"role": "assistant", "content": "latest reply"}],
         compaction_id="cmp_inline_1",
         trigger_reason="agent_inline_overflow",
+        source_message_ids=[
+            entry.message_id for entry in await manager.get_transcript("agent:main:main")
+        ],
     )
 
     transcript = await manager.get_transcript("agent:main:main")
@@ -1243,6 +1255,9 @@ async def test_delete_session_removes_compacted_transcript_archive(manager):
         "agent:main:main",
         "short summary",
         [{"role": "assistant", "content": "latest reply"}],
+        source_message_ids=[
+            entry.message_id for entry in await manager.get_transcript("agent:main:main")
+        ],
     )
     assert len(await manager.get_canonical_transcript("agent:main:main")) == 4
 
@@ -1269,6 +1284,9 @@ async def test_persist_compaction_result_without_summary_does_not_rewrite_transc
         "agent:main:main",
         "",
         [{"role": "assistant", "content": "latest reply"}],
+        source_message_ids=[
+            entry.message_id for entry in await manager.get_transcript("agent:main:main")
+        ],
     )
 
     assert await manager.get_transcript("agent:main:main") == original_transcript

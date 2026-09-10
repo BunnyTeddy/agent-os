@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Inline compaction preserves messages queued after the running turn loaded
+  its history, including their message IDs and metadata. Repeated compactions
+  keep those messages outside the summary, and stale transcript snapshots
+  cannot overwrite a changed or reset session
+  ([#1645](https://github.com/use-agent-os/agent-os/issues/1645)).
+
 - The chat composer's route picker now names the model a turn actually ran on
   while routing is automatic, and stops claiming an override when nothing is
   pinned. Pasting an image labelled the button `Auto · image_model` — a bare

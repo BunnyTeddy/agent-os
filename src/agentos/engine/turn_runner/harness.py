@@ -710,11 +710,11 @@ class _TurnRunnerAgentRunAdapter(AgentRunPort):
 class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
     """Bind ``SessionManager.persist_compaction_result`` + ``notify_compaction``.
 
-    Compaction refresh: the adapter forwards the persist call verbatim and
-    follows it with a completed lifecycle notification. Failed persistence
-    is handled by the stream consumer stage so completed is never emitted
-    before durable storage succeeds. The re-entrancy contract on
-    ``persist_compaction_result`` is untouched.
+    Compaction refresh: the adapter persists against the Agent's transcript
+    snapshot and follows it with a completed lifecycle notification. Failed
+    persistence is handled by the stream consumer stage so completed is never emitted
+    before durable storage succeeds. The retained snapshot is carried forward
+    for subsequent compactions in the same turn.
     """
 
     def __init__(self, runner: TurnRunner) -> None:
@@ -723,6 +723,7 @@ class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
     async def persist_and_notify(
         self,
         *,
+        agent: Agent,
         session_key: str,
         summary: str,
         kept_entries: list[Any],
@@ -750,13 +751,21 @@ class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
             p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
         ):
             persist_kwargs["trigger_reason"] = "agent_inline_overflow"
+        tracks_source = "source_message_ids" in params
+        if tracks_source:
+            source_message_ids = getattr(agent, "compaction_source_message_ids", None)
+            if source_message_ids is None:
+                raise ValueError("Inline compaction requires a loaded transcript snapshot")
+            persist_kwargs["source_message_ids"] = source_message_ids
         async with self._runner._session_write_context(session_key):
-            await persist_method(
+            retained_message_ids = await persist_method(
                 session_key,
                 summary,
                 kept_entries,
                 **persist_kwargs,
             )
+            if tracks_source:
+                agent.compaction_source_message_ids = retained_message_ids
         compaction_id = compaction_id or new_compaction_id()
         notify_compaction(
             session_key,

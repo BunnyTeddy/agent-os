@@ -367,6 +367,9 @@ async def test_forked_compacted_archive_stays_out_of_provider_messages(
         "portable summary without archived row text",
         [{"role": "assistant", "content": "active kept reply"}],
         compaction_id="cmp_provider_boundary",
+        source_message_ids=[
+            entry.message_id for entry in await session_manager.get_transcript(parent_key)
+        ],
     )
     await session_manager.branch(parent_key, child_key, fork_transcript=True)
 

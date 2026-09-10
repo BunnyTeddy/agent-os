@@ -92,6 +92,7 @@ class _RecordingCompactionPersist:
     async def persist_and_notify(
         self,
         *,
+        agent: Any,
         session_key: str,
         summary: str,
         kept_entries: list[Any],
