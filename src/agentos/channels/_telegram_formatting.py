@@ -11,6 +11,10 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*#*\s*$")
 _ORDERED_LIST_RE = re.compile(r"^(?P<indent>\s*)(?P<number>\d+)[.)]\s+(?P<text>.+)$")
 _UNORDERED_LIST_RE = re.compile(r"^(?P<indent>\s*)[-+*]\s+(?P<text>.+)$")
 _LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)<]+)\)")
+# CommonMark's blockquote marker: up to 3 leading spaces, `>`, then at most
+# one space before the content. `>quote` (no space) and `>` alone (an empty
+# quote line, used to separate paragraphs within one quote) both match.
+_BLOCKQUOTE_RE = re.compile(r"^ {0,3}>[ ]?(?P<text>.*)$")
 
 
 def _replace_code_spans(text: str) -> tuple[str, list[str]]:
@@ -229,9 +233,27 @@ def render_telegram_html(markdown: str) -> str:
             rendered.append(f"<b>{_render_inline(heading.group('text'))}</b>")
             index += 1
             continue
-        if line.startswith("> "):
-            rendered.append(f"<blockquote>{_render_inline(line[2:])}</blockquote>")
+        quote = _BLOCKQUOTE_RE.match(line)
+        if quote:
+            # Telegram's <blockquote> is a multiline element
+            # (<blockquote>line 1\nline 2</blockquote>); one tag per line
+            # renders as a stack of separate quote bubbles instead of one
+            # contiguous quote, so consecutive quote lines — including bare
+            # `>` lines that separate paragraphs within the quote — are
+            # gathered and joined inside a single tag.
+            quote_lines = [quote.group("text")]
             index += 1
+            while index < len(lines):
+                next_quote = _BLOCKQUOTE_RE.match(lines[index])
+                if not next_quote:
+                    break
+                quote_lines.append(next_quote.group("text"))
+                index += 1
+            rendered.append(
+                "<blockquote>"
+                + "\n".join(_render_inline(quote_line) for quote_line in quote_lines)
+                + "</blockquote>"
+            )
             continue
         ordered = _ORDERED_LIST_RE.match(line)
         if ordered:

@@ -277,6 +277,31 @@ async def test_approved_destructive_code_exec_uses_host_grant_when_sandbox_enabl
 
 
 @pytest.mark.asyncio
+async def test_destructive_code_exec_approval_is_not_truncated(
+    tmp_path: Path,
+) -> None:
+    """Issue #1567: the approval record stored (and shown to the human) must
+    contain the full script, not just its first 200 characters. A script
+    whose destructive statement lands past that boundary used to present as
+    harmless imports/docstring in the approval prompt -- the human approved
+    an operation they were never actually shown."""
+    ctx = current_tool_context.get()
+    assert ctx is not None
+    ctx.workspace_dir = str(tmp_path)
+    preamble = "# harmless-looking preamble\n" * 10
+    assert len(preamble) > 200
+    code = preamble + "import os\nos.remove('target.txt')"
+
+    pending = json.loads(await execute_code(code))
+
+    assert pending["status"] == "approval_required"
+    approval_id = str(pending["approval_id"])
+    entry = get_approval_queue().get(approval_id)
+    assert entry.params["command"] == code
+    assert "os.remove" in entry.params["command"]
+
+
+@pytest.mark.asyncio
 async def test_approved_background_process_uses_host_grant_when_sandbox_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -522,6 +547,111 @@ def test_shell_write_targets_detects_tee_without_whitespace_or_short_options(
 )
 def test_shell_write_targets_ignores_words_ending_in_tee(command: str) -> None:
     assert shell._shell_write_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install requests > /dev/null",
+        "pip install requests 2>/dev/null",
+        "pip install requests &>/dev/null",
+        "pip install requests > /dev/null 2>&1",
+        "pip install requests >/dev/null 2>&1",
+        "echo hi | tee /dev/null",
+        "echo hi | tee -a /dev/null",
+        "make build >/dev/null; make test >/dev/null",
+    ],
+)
+def test_shell_write_targets_ignores_the_null_sink(command: str) -> None:
+    """Discarding output is not a write. ``/dev/null`` is not under any lockdown
+    root, so counting it as a write target refused a large share of ordinary
+    commands under workspace lockdown."""
+    assert shell._shell_write_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cmd > out.txt 2>/dev/null", ["out.txt"]),
+        ("cmd 2>/dev/null > /etc/passwd", ["/etc/passwd"]),
+        ("cmd 2>/dev/null | tee /etc/passwd", ["/etc/passwd"]),
+        ("cmd >/dev/null | tee -a out.log", ["out.log"]),
+    ],
+)
+def test_shell_write_targets_keeps_real_targets_beside_a_null_sink(
+    command: str,
+    expected: list[str],
+) -> None:
+    """The null sink is dropped without over-stripping: a real target in the
+    same command still has to be reported."""
+    assert shell._shell_write_targets(command) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install requests > /dev/null",
+        "pip install requests 2>/dev/null",
+        "pip install requests &>/dev/null",
+        "pip install requests > /dev/null 2>&1",
+        "echo hi | tee /dev/null",
+    ],
+)
+async def test_workspace_lockdown_allows_null_sink_redirections(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ctx = current_tool_context.get()
+    assert ctx is not None
+    ctx.interaction_mode = InteractionMode.UNATTENDED
+    ctx.elevated = "bypass"
+    ctx.workspace_dir = str(workspace)
+    ctx.workspace_lockdown = True  # type: ignore[attr-defined]
+
+    result = await shell._check_exec_approval(
+        "exec_command",
+        command,
+        str(workspace),
+        "command requires approval",
+        None,
+        False,
+    )
+
+    assert result is None or result.get("reason") != "workspace_lockdown"
+
+
+@pytest.mark.asyncio
+async def test_workspace_lockdown_still_blocks_a_real_target_beside_a_null_sink(
+    tmp_path: Path,
+) -> None:
+    """Guards the other direction: dropping the null sink must not smuggle a
+    genuine out-of-workspace write past the lockdown."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    ctx = current_tool_context.get()
+    assert ctx is not None
+    ctx.interaction_mode = InteractionMode.UNATTENDED
+    ctx.elevated = "bypass"
+    ctx.workspace_dir = str(workspace)
+    ctx.workspace_lockdown = True  # type: ignore[attr-defined]
+
+    result = await shell._check_exec_approval(
+        "exec_command",
+        f"echo ok > {outside} 2>/dev/null",
+        str(workspace),
+        "command requires approval",
+        None,
+        False,
+    )
+
+    assert result is not None
+    assert result["status"] == "blocked"
+    assert result["reason"] == "workspace_lockdown"
+    assert result["target"] == str(outside)
 
 
 @pytest.mark.asyncio
@@ -881,3 +1011,51 @@ async def test_root_wipe_is_hard_blocked_at_the_exec_approval_boundary() -> None
         assert result["status"] == "blocked"
         assert result["reason"] == "sensitive_path"
         assert result["sensitive_path"] == "/"
+
+
+def test_sandbox_request_for_resolves_relative_workdir(tmp_path: Path) -> None:
+    """Relative workdir in _sandbox_request_for must resolve against workspace (#1562)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sub = ws / "subfolder"
+    sub.mkdir()
+
+    configure_runtime(SandboxSettings(sandbox=False), workspace=ws)
+    token = current_tool_context.set(
+        ToolContext(workspace_dir=str(ws), session_key="agent:main:test")
+    )
+    try:
+        built = shell._sandbox_request_for("exec_command", "echo test", "subfolder")
+        assert built is not None
+        req, _, session_id = built
+        assert req.cwd == sub.resolve()
+        assert session_id == "agent:main:test"
+    finally:
+        current_tool_context.reset(token)
+
+
+def test_sandbox_request_for_populates_env_and_matches_fingerprint(tmp_path: Path) -> None:
+    """_sandbox_request_for must include execution environment for fingerprinting (#1562)."""
+    from agentos.sandbox.governance import action_fingerprint
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    configure_runtime(SandboxSettings(sandbox=False), workspace=ws)
+    token = current_tool_context.set(
+        ToolContext(workspace_dir=str(ws), session_key="agent:main:test")
+    )
+    try:
+        custom_env = {"FOO": "bar"}
+        built = shell._sandbox_request_for("exec_command", "echo test", None, env=custom_env)
+        assert built is not None
+        req, _, _ = built
+        assert "PATH" in req.env
+        assert req.env.get("FOO") == "bar"
+
+        # Fingerprint must be consistent and include PATH
+        fp = action_fingerprint(req)
+        assert len(fp) == 32
+    finally:
+        current_tool_context.reset(token)
+

@@ -611,7 +611,14 @@ async def execute_code(
         try:
             approval_response = await _check_exec_approval(
                 tool_name="execute_code",
-                command=code[:200],
+                # The full script, not a prefix: the approval record stored
+                # and rendered to the human is params["command"], and a
+                # truncated payload showed a reviewer only the (often
+                # harmless-looking) first 200 characters — imports, a
+                # docstring — never the destructive statement further down
+                # that actually triggered the prompt. Approval exists for
+                # informed consent, which a truncated payload cannot give.
+                command=code,
                 workdir=None,
                 warning=warning,
                 approval_id=approval_id,

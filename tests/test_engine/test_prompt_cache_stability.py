@@ -362,6 +362,8 @@ async def test_forked_compacted_archive_stays_out_of_provider_messages(
             f"archive-only old message {index}",
             token_count=5,
         )
+    source_session = await session_manager.get_session(parent_key)
+    assert source_session is not None
     await session_manager.persist_compaction_result(
         parent_key,
         "portable summary without archived row text",
@@ -370,6 +372,8 @@ async def test_forked_compacted_archive_stays_out_of_provider_messages(
         source_message_ids=[
             entry.message_id for entry in await session_manager.get_transcript(parent_key)
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
     await session_manager.branch(parent_key, child_key, fork_transcript=True)
 

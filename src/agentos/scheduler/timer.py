@@ -253,11 +253,11 @@ class SchedulerTimer:
                     delay = self.MAX_TIMER_DELAY
 
                 # Wait on nudge event with timeout — nudge wakes us early
-                self._nudge_event.clear()
                 try:
                     await asyncio.wait_for(self._nudge_event.wait(), timeout=delay)
                 except TimeoutError:
                     pass
+                self._nudge_event.clear()
 
                 await self._tick()
 
@@ -302,6 +302,7 @@ class SchedulerTimer:
     async def stop(self) -> None:
         """Stop the timer loop and await cancellation of all owned job tasks."""
         self._started = False
+        self._nudge_event.set()
         if self._loop_task is not None and not self._loop_task.done():
             self._loop_task.cancel()
             try:

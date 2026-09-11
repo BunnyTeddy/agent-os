@@ -23,7 +23,6 @@ from agentos.secrets import clean_header_secret
 
 from .context_capabilities import supports_openrouter_explicit_prompt_cache
 from .error_body import read_bounded_body, summarize_error_body
-from .minimax_compat import contains_minimax_protocol, parse_minimax_tool_calls
 from .openrouter_attribution import openrouter_app_headers
 from .protocol import ProviderConnectionConfig, ProviderMetadata
 from .reasoning import ThinkTagStreamSplitter
@@ -31,6 +30,7 @@ from .request_proof import (
     ProviderRequestBudgetExceededError,
     prove_provider_payload_from_env,
 )
+from .text_tool_protocol import parse_text_tool_calls
 from .types import (
     ChatConfig,
     DoneEvent,
@@ -425,47 +425,54 @@ def _synthesize_text_tool_events(
 
     events: list[ToolUseStartEvent | ToolUseEndEvent] = []
     allowed_tool_names = {tool.name for tool in tools}
-    if contains_minimax_protocol(full_text):
-        for minimax_call in parse_minimax_tool_calls(full_text):
-            if minimax_call.name not in allowed_tool_names:
-                continue
-            tool_use_id = f"minimax_compat_{uuid4().hex[:12]}"
+    # Any wrapper engine.tool_text_compat hides from the user must also be
+    # executed here, so detection rides on the <invoke> block itself rather
+    # than on the wrapper around it.
+    for text_call in parse_text_tool_calls(full_text):
+        if text_call.name not in allowed_tool_names:
+            continue
+        tool_use_id = f"text_protocol_{uuid4().hex[:12]}"
+        events.append(
+            ToolUseStartEvent(
+                tool_use_id=tool_use_id,
+                tool_name=text_call.name,
+                synthetic_from_text=True,
+            )
+        )
+        events.append(
+            ToolUseEndEvent(
+                tool_use_id=tool_use_id,
+                tool_name=text_call.name,
+                arguments=dict(text_call.arguments),
+                synthetic_from_text=True,
+            )
+        )
+    # Fall back on whether anything was actually synthesized, not on whether
+    # any XML parsed: an <invoke> naming a tool this turn never offered must
+    # not swallow a genuine trailing plain-JSON call in the same reply.
+    if events:
+        return events
+
+    plain_call = _parse_plain_json_tool_call(full_text)
+    if plain_call is not None:
+        tool_name, arguments = plain_call
+        if tool_name in allowed_tool_names:
+            tool_use_id = f"text_compat_{uuid4().hex[:12]}"
             events.append(
                 ToolUseStartEvent(
                     tool_use_id=tool_use_id,
-                    tool_name=minimax_call.name,
+                    tool_name=tool_name,
                     synthetic_from_text=True,
                 )
             )
             events.append(
                 ToolUseEndEvent(
                     tool_use_id=tool_use_id,
-                    tool_name=minimax_call.name,
-                    arguments=dict(minimax_call.arguments),
+                    tool_name=tool_name,
+                    arguments=arguments,
                     synthetic_from_text=True,
                 )
             )
-    else:
-        plain_call = _parse_plain_json_tool_call(full_text)
-        if plain_call is not None:
-            tool_name, arguments = plain_call
-            if tool_name in allowed_tool_names:
-                tool_use_id = f"text_compat_{uuid4().hex[:12]}"
-                events.append(
-                    ToolUseStartEvent(
-                        tool_use_id=tool_use_id,
-                        tool_name=tool_name,
-                        synthetic_from_text=True,
-                    )
-                )
-                events.append(
-                    ToolUseEndEvent(
-                        tool_use_id=tool_use_id,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        synthetic_from_text=True,
-                    )
-                )
     return events
 
 
@@ -1188,11 +1195,11 @@ class OpenAIProvider:
                             thought_signature=call.get("thought_signature"),
                         )
 
-                    # Last-resort MiniMax compatibility: some OpenRouter
-                    # upstreams leak native MiniMax XML tool calls as text
-                    # instead of structured tool_calls. Only synthesize calls
-                    # when no structured calls arrived, tools were offered, and
-                    # the parsed tool name is explicitly allowed by this turn.
+                    # Last-resort text-protocol compatibility: some upstreams
+                    # leak a native XML tool call as text instead of structured
+                    # tool_calls. Only synthesize calls when no structured calls
+                    # arrived, tools were offered, and the parsed tool name is
+                    # explicitly allowed by this turn.
                     if not pending_calls and tools and assistant_text_parts:
                         full_text = "".join(assistant_text_parts)
                         for event in _synthesize_text_tool_events(full_text, tools):

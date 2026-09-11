@@ -10,6 +10,7 @@ changed.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -45,9 +46,12 @@ class StubSessionIndexer:
     def __init__(self) -> None:
         self.calls = 0
         self.fail = False
+        self.gate: Any = None
 
     async def sync(self, *, force: bool = False) -> Any:
         self.calls += 1
+        if self.gate is not None:
+            await self.gate.wait()
         if self.fail:
             raise RuntimeError("session index unavailable")
         return type("Result", (), {"indexed": 0, "removed": 0, "skipped": 0})()
@@ -186,3 +190,39 @@ async def test_failed_search_session_sync_keeps_the_delta_pending_until_it_succe
 
     assert indexer.calls == 2
     assert manager._delta.has_pending() is False
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_arrives_mid_sync_is_not_lost(tmp_path) -> None:
+    """Regression test: notify_message() during an in-flight sync must survive.
+
+    ``sync()`` used to snapshot ``has_pending()`` once at the top of the
+    call and unconditionally ``reset()`` the delta tracker at the end. The
+    poll loop and any request-triggered sync (search, session-start) run as
+    independent asyncio tasks with no lock between them, so a burst of new
+    messages recorded via ``notify_message()`` while a sync is still
+    awaiting its session indexer used to be silently wiped out by that
+    sync's own completion -- even though the sync started before that
+    activity arrived and never actually covered it.
+    """
+    workspace, memory = _make_workspace(tmp_path)
+    indexer = StubSessionIndexer()
+    indexer.gate = asyncio.Event()
+    manager = _manager(RecordingStore(), workspace, memory, session_indexer=indexer)
+
+    manager.notify_message(10_000)
+
+    sync_task = asyncio.create_task(manager.sync(reason="search:tool"))
+    await asyncio.sleep(0)
+    assert not sync_task.done(), "sync should be suspended on the indexer gate"
+
+    # New session activity arrives while the first sync is still running.
+    manager.notify_message(90_000)
+
+    indexer.gate.set()
+    await sync_task
+
+    # The 90_000 bytes that arrived mid-flight were never covered by the
+    # sync that just finished and must still be pending.
+    assert manager._delta._pending_bytes == 90_000
+    assert manager._delta.has_pending() is True

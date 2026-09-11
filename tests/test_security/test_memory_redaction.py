@@ -94,3 +94,69 @@ from agentos.memory.redaction import redact_memory_text
 )
 def test_redact_memory_text(input_text: str, expected_text: str) -> None:
     assert redact_memory_text(input_text) == expected_text
+
+
+@pytest.mark.parametrize(
+    "input_text",
+    [
+        "reset_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "csrf_token=8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "device_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "verification_token = 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "password_reset_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "app_secret: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        "db_password = hunter2hunter2",
+        "stripe_api_key: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+    ],
+)
+def test_snake_case_qualified_secret_names_are_redacted(input_text: str) -> None:
+    # "_" is a word character, so \b never fires before "token" when a
+    # snake_case qualifier is glued to it — the value used to pass through
+    # unmasked on the way into durable memory.
+    name, _, _value = input_text.partition("=" if "=" in input_text else ":")
+    redacted = redact_memory_text(input_text)
+    assert "8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b" not in redacted
+    assert "hunter2hunter2" not in redacted
+    assert redacted.startswith(name.rstrip())
+
+
+@pytest.mark.parametrize(
+    "input_text",
+    [
+        "sellToken: 123",
+        "token_count = 5",
+        "my_token_count = 10",
+        "reset_token_count = 5",
+        "secret_santa_name: bob",
+        "the password reset flow is broken",
+    ],
+)
+def test_snake_case_widening_does_not_redact_ordinary_field_names(input_text: str) -> None:
+    assert redact_memory_text(input_text) == input_text
+
+
+def test_hyphen_runs_do_not_backtrack_quadratically() -> None:
+    """redact_memory_text runs per transcript message; it must stay linear.
+
+    Every "-" is a word boundary, so an unbounded qualifier chain retried a
+    growing prefix at each of the n segment starts. One 100KB line took 22s.
+    """
+    import time
+
+    text = "8f3a-" * 20000
+
+    start = time.perf_counter()
+    redact_memory_text(text)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.0, f"redaction took {elapsed:.2f}s on a 100KB hyphen run"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["reset_token", "app_reset_token", "mobile_app_reset_token", "my_mobile_app_reset_token"],
+)
+def test_qualifier_chains_up_to_the_bound_still_redact(name: str) -> None:
+    secret = "8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b"
+
+    assert secret not in redact_memory_text(f"{name}: {secret}")

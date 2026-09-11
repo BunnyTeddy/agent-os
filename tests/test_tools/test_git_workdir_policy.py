@@ -20,6 +20,57 @@ def test_git_effective_workdir_resolves_context_workspace(tmp_path: Path) -> Non
         current_tool_context.reset(token)
 
 
+def test_git_effective_workdir_joins_relative_path_onto_workspace(
+    tmp_path: Path,
+) -> None:
+    """A relative workdir resolves against the workspace, not the process CWD.
+
+    Regression for #1566: returning the raw string made ``_run_git`` resolve it
+    against the process CWD, so ``git_status(workdir="sub")`` inspected
+    ``$PWD/sub`` — possibly a different repository — whenever the gateway ran
+    from anywhere but the workspace.
+    """
+    workspace = tmp_path / "workspace"
+    subproject = workspace / "my-subproject"
+    subproject.mkdir(parents=True)
+
+    token = current_tool_context.set(ToolContext(workspace_dir=str(workspace)))
+    try:
+        assert git._effective_workdir("my-subproject") == str(subproject.resolve())
+    finally:
+        current_tool_context.reset(token)
+
+
+def test_git_effective_workdir_keeps_absolute_path_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    """An absolute workdir is resolved as-is, not re-anchored to the workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    token = current_tool_context.set(ToolContext(workspace_dir=str(workspace)))
+    try:
+        assert git._effective_workdir(str(other)) == str(other.resolve())
+    finally:
+        current_tool_context.reset(token)
+
+
+def test_git_effective_workdir_dotdot_stays_inside_resolved_workspace(
+    tmp_path: Path,
+) -> None:
+    """Lexical traversal is resolved, keeping the containment check honest."""
+    workspace = tmp_path / "workspace"
+    (workspace / "nested").mkdir(parents=True)
+
+    token = current_tool_context.set(ToolContext(workspace_dir=str(workspace)))
+    try:
+        assert git._effective_workdir("nested/../nested") == str((workspace / "nested").resolve())
+    finally:
+        current_tool_context.reset(token)
+
+
 def test_git_effective_workdir_rejects_foreign_posix_absolute_path_on_windows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

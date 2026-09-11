@@ -31,6 +31,7 @@ from agentos.channels._util import (
     StreamThrottle,
     check_channel_file_size,
     retry_request,
+    split_text_for_limit,
 )
 from agentos.channels.contract import (
     ChannelCapabilities,
@@ -58,6 +59,7 @@ _DISCORD_GROUP_DM_CHANNEL_TYPES = {3}
 _DISCORD_THREAD_CHANNEL_TYPES = {10, 11, 12}
 _DISCORD_APPLICATION_COMMAND_INTERACTION_TYPE = 2
 _DISCORD_DEFERRED_CHANNEL_MESSAGE_RESPONSE_TYPE = 5
+_DISCORD_MESSAGE_TEXT_LIMIT = 2000
 
 # Gateway intents bitmask
 GATEWAY_INTENTS = (
@@ -1102,28 +1104,21 @@ class DiscordChannel:
         return kwargs
 
     async def send(self, message: OutgoingMessage) -> ChannelSendResult:
-        await self._rate_limiter.acquire()
         client = self._get_client()
         channel_id = message.reply_to or self.config.default_channel_id
-
-        payload: dict[str, Any] = {"content": message.content}
-
-        if message.metadata.get("embeds"):
-            payload["embeds"] = message.metadata["embeds"]
-
-        if message.metadata.get("components"):
-            payload["components"] = message.metadata["components"]
-
-        if message.metadata.get("reply_to_message_id"):
-            payload["message_reference"] = {
-                "message_id": message.metadata["reply_to_message_id"],
-            }
+        segments = self._split_content_for_send(message.content)
 
         interaction_token = message.metadata.get("interaction_token")
-        if isinstance(interaction_token, str) and interaction_token:
-            application_id = message.metadata.get("interaction_application_id")
-            if not isinstance(application_id, str) or not application_id:
-                application_id = self.config.application_id
+        use_interaction_response = isinstance(interaction_token, str) and bool(interaction_token)
+        application_id = ""
+        interaction_id = ""
+        if use_interaction_response:
+            raw_application_id = message.metadata.get("interaction_application_id")
+            application_id = (
+                raw_application_id
+                if isinstance(raw_application_id, str) and raw_application_id
+                else self.config.application_id
+            )
             interaction_id = str(message.metadata.get("interaction_id") or "")
             if not application_id:
                 return ChannelSendResult.failed(
@@ -1131,42 +1126,85 @@ class DiscordChannel:
                     target_id=interaction_id or channel_id,
                     reason="missing Discord application id for interaction response",
                 )
+
+        result: ChannelSendResult | None = None
+        for index, segment in enumerate(segments):
+            payload: dict[str, Any] = {"content": segment}
+            # A reply reference belongs on the first message of a chunked
+            # reply; embeds/components describe the complete answer and
+            # belong on the last one, not repeated on every continuation.
+            if index == 0 and message.metadata.get("reply_to_message_id"):
+                payload["message_reference"] = {
+                    "message_id": message.metadata["reply_to_message_id"],
+                }
+            if index == len(segments) - 1:
+                if message.metadata.get("embeds"):
+                    payload["embeds"] = message.metadata["embeds"]
+                if message.metadata.get("components"):
+                    payload["components"] = message.metadata["components"]
+
+            await self._rate_limiter.acquire()
+            if use_interaction_response and index == 0:
+                resp = await retry_request(
+                    client.patch,
+                    f"/webhooks/{application_id}/{interaction_token}/messages/@original",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                message_id = str(data.get("id") or "")
+                if message_id:
+                    self._sent_messages[message_id] = channel_id
+                log.debug(
+                    "discord.interaction_response_completed",
+                    interaction_id=interaction_id,
+                    message_id=message_id,
+                )
+                result = ChannelSendResult.sent(
+                    capability=ChannelCapabilities.GROUP_CHAT,
+                    target_id=interaction_id or channel_id,
+                    provider_message_id=message_id,
+                )
+                continue
+
+            # Chunks after the first always go to the channel directly, even
+            # for an interaction response: Discord's original-response slot
+            # holds exactly one message, so overflow is delivered as regular
+            # follow-up channel messages instead of being dropped.
             resp = await retry_request(
-                client.patch,
-                f"/webhooks/{application_id}/{interaction_token}/messages/@original",
+                client.post,
+                f"/channels/{channel_id}/messages",
                 json=payload,
+                headers=self._auth_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
-            message_id = str(data.get("id") or "")
-            if message_id:
-                self._sent_messages[message_id] = channel_id
-            log.debug(
-                "discord.interaction_response_completed",
-                interaction_id=interaction_id,
-                message_id=message_id,
-            )
-            return ChannelSendResult.sent(
+            self._sent_messages[data["id"]] = channel_id
+            log.debug("discord.send", channel_id=channel_id, message_id=data.get("id"))
+            result = ChannelSendResult.sent(
                 capability=ChannelCapabilities.GROUP_CHAT,
-                target_id=interaction_id or channel_id,
-                provider_message_id=message_id,
+                target_id=channel_id,
+                provider_message_id=str(data.get("id", "")),
             )
 
-        resp = await retry_request(
-            client.post,
-            f"/channels/{channel_id}/messages",
-            json=payload,
-            headers=self._auth_headers(),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._sent_messages[data["id"]] = channel_id
-        log.debug("discord.send", channel_id=channel_id, message_id=data.get("id"))
-        return ChannelSendResult.sent(
-            capability=ChannelCapabilities.GROUP_CHAT,
-            target_id=channel_id,
-            provider_message_id=str(data.get("id", "")),
-        )
+        assert result is not None  # segments always has at least one element
+        return result
+
+    @staticmethod
+    def _split_content_for_send(content: str) -> list[str]:
+        """Split *content* into one message per Discord's 2000-char cap.
+
+        Reuses the same splitter Telegram's adapter relies on rather than a
+        second, independently-drifting length check.
+        """
+        segments: list[str] = []
+        remaining = content
+        while True:
+            head, tail = split_text_for_limit(remaining, _DISCORD_MESSAGE_TEXT_LIMIT)
+            segments.append(head)
+            if not tail:
+                return segments
+            remaining = tail
 
     MAX_FILE_BYTES: ClassVar[int] = 10 * 1024 * 1024
 

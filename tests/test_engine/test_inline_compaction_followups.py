@@ -14,7 +14,7 @@ from agentos.engine.turn_runner.harness import _TurnRunnerCompactionPersistAdapt
 from agentos.engine.turn_runner.stream_consumer_stage import _CompactionHandler
 from agentos.engine.types import CompactionEvent
 from agentos.session.manager import SessionManager
-from agentos.session.models import TranscriptEntry
+from agentos.session.models import SessionIntent, TranscriptEntry
 from agentos.session.storage import SessionStorage
 
 KEY = "agent:main:compaction-test"
@@ -251,3 +251,87 @@ async def test_missing_inline_snapshot_never_falls_back_to_latest_row_count(cont
     await _compact(runner, agent, [])
     assert await manager.get_transcript(KEY) == before
     assert await manager.get_summaries(KEY) == []
+
+
+@pytest.mark.parametrize("start_empty", [False, True])
+@pytest.mark.parametrize("change", ["reset", "recreate", "epoch"])
+@pytest.mark.asyncio
+async def test_empty_snapshot_rejects_changed_session_identity(
+    context, start_empty, change, monkeypatch, tmp_path
+):
+    manager, runner, agent = context
+    monkeypatch.setattr("agentos.session.manager._archive_dir", lambda: tmp_path)
+    if start_empty:
+        await runner._load_history(agent, KEY, trim_last_user=False)
+    else:
+        await _load_history(manager, runner, agent)
+        await _compact(runner, agent, [], "before-reset")
+    assert agent.compaction_source_message_ids == []
+
+    if change == "reset":
+        await manager.apply_intent(KEY, SessionIntent.RESET_SAME_KEY)
+    elif change == "recreate":
+        await manager.delete(KEY)
+        await manager.create(KEY)
+    else:
+        await manager.storage.increment_epoch(KEY)
+    await manager.append_message(KEY, "user", "new conversation")
+    before = await manager.get_transcript(KEY)
+    canonical_before = await manager.get_canonical_transcript(KEY)
+    summaries_before = await manager.get_summaries(KEY)
+    node_before = await manager.get_session(KEY)
+
+    await _compact(
+        runner,
+        agent,
+        [{"role": "assistant", "content": "stale answer from old session"}],
+        "after-reset",
+    )
+
+    assert await manager.get_transcript(KEY) == before
+    assert await manager.get_canonical_transcript(KEY) == canonical_before
+    assert await manager.get_summaries(KEY) == summaries_before
+    assert await manager.get_session(KEY) == node_before
+
+
+@pytest.mark.asyncio
+async def test_empty_snapshot_can_compact_again_in_unchanged_session(context):
+    manager, runner, agent = context
+    await _load_history(manager, runner, agent)
+    await _compact(runner, agent, [], "first-full-compaction")
+    queued = await manager.append_message(KEY, "user", "queued follow-up")
+
+    await _compact(
+        runner,
+        agent,
+        [{"role": "assistant", "content": "new work from the running turn"}],
+        "second-compaction",
+    )
+
+    transcript = await manager.get_transcript(KEY)
+    assert any(entry.content == "new work from the running turn" for entry in transcript)
+    assert any(entry.message_id == queued.message_id for entry in transcript)
+    assert len(await manager.get_summaries(KEY)) == 2
+    assert queued.message_id not in agent.compaction_source_message_ids
+
+
+@pytest.mark.asyncio
+async def test_epoch_change_at_commit_rejects_empty_snapshot_atomically(context, monkeypatch):
+    manager, runner, agent = context
+    await runner._load_history(agent, KEY, trim_last_user=False)
+    storage = manager.storage
+    rewrite = storage.rewrite_compacted_session
+
+    async def racing_rewrite(**kwargs):
+        await storage.increment_epoch(KEY)
+        await rewrite(**kwargs)
+
+    monkeypatch.setattr(storage, "rewrite_compacted_session", racing_rewrite)
+    await _compact(runner, agent, [{"role": "user", "content": "stale request"}])
+
+    assert await manager.get_transcript(KEY) == []
+    assert await manager.get_summaries(KEY) == []
+    assert await manager.get_context_states(KEY) == []
+    assert (await manager.get_session(KEY)).epoch == 1
+    assert (await manager.get_session(KEY)).compaction_count == 0
+    assert not storage.conn.in_transaction

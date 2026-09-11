@@ -693,6 +693,8 @@ class Agent:
         # The runner tracks durable messages represented by this turn's history.
         # Pending follow-ups must not become part of an inline compaction.
         self.compaction_source_message_ids: list[str] | None = None
+        self.compaction_source_session_id: str | None = None
+        self.compaction_source_epoch: int | None = None
         self._turn_call_logger = turn_call_logger
         self._tool_registry: ToolRegistry | None = tool_registry
         self._tool_context: ToolContext | None = tool_context

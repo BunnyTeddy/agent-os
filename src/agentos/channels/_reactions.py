@@ -26,8 +26,22 @@ class _BaseStatusReactor:
         self._adapter = adapter; self._log = logger; self._disabled = False; self._active: dict[str, list[Any]] = defaultdict(list)
     async def received(self, message: IncomingMessage) -> None: await self._add_state(message, "received")
     async def running(self, message: IncomingMessage) -> None: await self._add_state(message, "running")
-    async def failed(self, message: IncomingMessage) -> None: await self._add_state(message, "failed")
-    async def completed(self, message: IncomingMessage) -> None:
+    async def failed(self, message: IncomingMessage) -> None:
+        # Terminal, like ``completed``: clear the progress marks so the message
+        # is not left carrying a contradictory pair, but keep the failure mark
+        # as the outcome. The failure token is deliberately not tracked -- there
+        # is no later call to reclaim it, so tracking it leaks the ``_active``
+        # entry for the adapter's lifetime.
+        await self._clear_active(message)
+        if self._disabled:
+            return
+        try:
+            await self._add(message, "failed")
+        except Exception as exc:
+            self._warn_failure("add:failed", exc)
+            self._disable(f"add_failed:{type(exc).__name__}")
+    async def completed(self, message: IncomingMessage) -> None: await self._clear_active(message)
+    async def _clear_active(self, message: IncomingMessage) -> None:
         key = self._message_key(message)
         for token in self._active.pop(key, []):
             try:

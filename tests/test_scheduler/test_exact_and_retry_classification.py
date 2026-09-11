@@ -200,6 +200,37 @@ def test_classify_error_defaults_to_transient() -> None:
     assert classify_error("something obscure") == "transient"
 
 
+def test_classify_error_ignores_status_codes_inside_longer_numbers() -> None:
+    # "403" is a substring of the "4033" in a millisecond duration, and the
+    # permanent loop runs first, so plain containment let an ordinary timeout
+    # permanently disable the job on its first failure.
+    assert classify_error("Request timed out after 4033ms") == "transient"
+    assert classify_error("Upstream latency 4011ms on retry attempt") == "transient"
+    assert classify_error("job failed after 5030 attempts") == "transient"
+
+
+def test_classify_error_ignores_status_codes_inside_decimals() -> None:
+    # "." is not a word character, so \b alone still read these as codes.
+    assert classify_error("Handler timed out after 12.403 seconds") == "transient"
+    assert classify_error("p95 0.403 s") == "transient"
+    assert classify_error("latency 1.429 s") == "transient"
+
+
+def test_classify_error_ignores_status_codes_inside_file_names() -> None:
+    # scripts.py interpolates path.name into the error text.
+    assert classify_error("Script timed out after 30s: report-403.sh") == "transient"
+
+
+def test_classify_error_still_matches_delimited_status_codes() -> None:
+    assert classify_error("HTTP 403: forbidden") == "permanent"
+    assert classify_error("status=401") == "permanent"
+    assert classify_error("(429)") == "transient"
+    # A trailing sentence period is not a file extension.
+    assert classify_error("got 403.") == "permanent"
+    # A code glued to a name by a word character, which \b would have dropped.
+    assert classify_error("upstream returned http_403") == "permanent"
+
+
 def _recurring_failure(error: str) -> CronJob:
     return CronJob(
         id="job-1",

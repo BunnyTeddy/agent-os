@@ -138,6 +138,9 @@ class _ResultCompactionSessionManager:
         self.compact_with_result_calls: list[tuple[str, int, object | None]] = []
         self.compact_with_result_kwargs: list[dict[str, object | None]] = []
 
+    async def get_session(self, session_key: str) -> SimpleNamespace:
+        return SimpleNamespace(session_id="test-session-id", epoch=0)
+
     async def get_transcript(self, session_key: str) -> list[TranscriptEntry]:
         return list(self._transcript)
 

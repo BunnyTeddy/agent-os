@@ -259,14 +259,23 @@ async def _drain_task_runtime_for_session(
 
     try:
         rows = await task_runtime.list(session_key=session_key)
+        undrained = 0
         for row in rows:
-            if _task_status_value(getattr(row, "status", None)) in _ACTIVE_TASK_STATUSES:
+            if _task_status_value(getattr(row, "status", None)) not in _ACTIVE_TASK_STATUSES:
+                continue
+            try:
                 await asyncio.wait_for(
                     task_runtime.wait(row.task_id),
                     timeout=_RESET_RUNTIME_CANCEL_DRAIN_SECONDS,
                 )
-    except TimeoutError:
-        log.warning(f"sessions.{op}.task_runtime_drain_timeout", session_key=session_key)
+            except TimeoutError:
+                undrained += 1
+        if undrained:
+            log.warning(
+                f"sessions.{op}.task_runtime_drain_timeout",
+                session_key=session_key,
+                undrained_count=undrained,
+            )
     except Exception:
         log.warning(f"sessions.{op}.task_runtime_drain_failed", session_key=session_key)
 

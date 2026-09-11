@@ -135,7 +135,6 @@ class SlackChannel:
     )
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
-    _last_thread_ts: str | None = field(default=None, init=False, repr=False)
     _last_message_at: datetime | None = field(default=None, init=False, repr=False)
     _dedupe: EventDedupeCache = field(
         default_factory=lambda: EventDedupeCache(max_size=10_000),
@@ -340,10 +339,6 @@ class SlackChannel:
         if thread_ts is not None and ts is not None:
             metadata["is_thread_root"] = thread_ts == ts
 
-        # Track last thread_ts for reply_in_thread auto-threading
-        if thread_ts is not None:
-            self._last_thread_ts = thread_ts
-
         return IncomingMessage(
             sender_id=event.get("user", self.sender_id),
             channel_id=event.get("channel", self.slack_channel_id),
@@ -399,8 +394,12 @@ class SlackChannel:
             channel = str(meta["channel"])
         if "thread_ts" in meta:
             thread_ts = meta["thread_ts"]
-        elif thread_ts is None and self.reply_in_thread and self._last_thread_ts:
-            thread_ts = self._last_thread_ts
+        # No account-wide fallback anchor here on purpose: one shared
+        # ``thread_ts`` serves every channel, thread and user, so an outgoing
+        # message without its own anchor would land in whichever conversation
+        # last spoke. A reply that needs a thread carries one already, via
+        # ``build_reply_message``/``streaming_reply_kwargs``; anything else
+        # belongs in the channel, un-threaded.
         if not channel:
             log.error("slack.send_failed", channel="", error="no_target_channel")
             raise RuntimeError("Slack send has no target channel")

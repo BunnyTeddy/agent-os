@@ -378,3 +378,59 @@ async def retry_request(
                 continue
             raise
     raise last_exc or RuntimeError("retry_request exhausted")
+
+
+# ---------------------------------------------------------------------------
+# Message-length chunking
+# ---------------------------------------------------------------------------
+
+
+def split_text_for_limit(
+    segment: str,
+    limit: int,
+    *,
+    measure: Callable[[str], int] | None = None,
+) -> tuple[str, str]:
+    """Split *segment* into the largest prefix that fits *limit*, plus the rest.
+
+    Shared by every adapter with a platform message-length cap, so a
+    truncated final reply isn't traded for a second, independently-drifting
+    splitter per channel. ``measure`` overrides what's compared against
+    *limit* — a channel that renders markdown to something longer than the
+    source text (Telegram's HTML) passes a render-then-``len`` callable;
+    plain-text channels (Discord) take the ``len`` default.
+
+    The cut point is found by binary search and then nudged back to the
+    nearest line/word boundary so a chunk doesn't end mid-word. A fenced
+    code block (```...```) split mid-fence would leave each half with an
+    unbalanced fence — some platforms reject a message whose Markdown
+    entities don't parse, turning a length problem into a delivery failure —
+    so if an odd number of fences precede the cut, one is open, and the cut
+    backs up to just before that fence: the first half never contains a
+    half-open block, and the second half reopens it from its own start,
+    fully balanced.
+    """
+    length = measure if measure is not None else len
+    if length(segment) <= limit:
+        return segment, ""
+    low, high, best = 1, len(segment) - 1, 1
+    while low <= high:
+        mid = (low + high) // 2
+        if length(segment[:mid]) <= limit:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    cut = best
+    for boundary in ("\n", " "):
+        found = segment.rfind(boundary, 0, best)
+        if found >= best // 2:
+            cut = found + 1
+            break
+    if segment.count("```", 0, cut) % 2 == 1:
+        fence_start = segment.rfind("```", 0, cut)
+        newline_before_fence = segment.rfind("\n", 0, fence_start)
+        candidate = newline_before_fence + 1 if newline_before_fence >= 0 else 0
+        if candidate > 0:
+            cut = candidate
+    return segment[:cut], segment[cut:]

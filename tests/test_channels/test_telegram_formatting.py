@@ -53,6 +53,58 @@ if x < 2:
     ) in rendered
 
 
+def test_multiline_blockquote_is_grouped_into_a_single_tag() -> None:
+    """Issue #1532: Telegram's <blockquote> is a multiline element -- one tag
+    per source line rendered as a stack of separate quote bubbles instead of
+    one contiguous quote."""
+    rendered = render_telegram_html("> Line 1\n> Line 2")
+
+    assert rendered == "<blockquote>Line 1\nLine 2</blockquote>"
+
+
+def test_blockquote_empty_line_separates_paragraphs_without_leaking_raw_gt() -> None:
+    """A bare `>` line inside a quote must stay part of the quote as an empty
+    line, not fall through to inline rendering and leak a raw `&gt;`."""
+    rendered = render_telegram_html("> Paragraph 1\n>\n> Paragraph 2")
+
+    assert rendered == "<blockquote>Paragraph 1\n\nParagraph 2</blockquote>"
+    assert "&gt;" not in rendered
+
+
+def test_blockquote_marker_without_a_space_is_recognized() -> None:
+    rendered = render_telegram_html(">no space")
+
+    assert rendered == "<blockquote>no space</blockquote>"
+
+
+@pytest.mark.parametrize("indent", ["", " ", "  ", "   "])
+def test_blockquote_allows_up_to_three_leading_spaces(indent: str) -> None:
+    rendered = render_telegram_html(f"{indent}> quote")
+
+    assert rendered == "<blockquote>quote</blockquote>"
+
+
+def test_four_leading_spaces_is_not_a_blockquote_marker() -> None:
+    """Four or more leading spaces is CommonMark's indented-code-block
+    territory, not a blockquote -- the line falls through to plain
+    (escaped) inline rendering, same as before this fix."""
+    rendered = render_telegram_html("    > not a quote")
+
+    assert rendered == "    &gt; not a quote"
+
+
+def test_blockquote_stops_at_the_first_non_quote_line() -> None:
+    rendered = render_telegram_html("> quoted\nnot quoted")
+
+    assert rendered == "<blockquote>quoted</blockquote>\nnot quoted"
+
+
+def test_blockquote_content_still_gets_inline_formatting() -> None:
+    rendered = render_telegram_html("> **bold** and `code`")
+
+    assert rendered == "<blockquote><b>bold</b> and <code>code</code></blockquote>"
+
+
 def test_telegram_send_payload_auto_renders_html() -> None:
     channel = TelegramChannel(TelegramChannelConfig(token="token"))
 

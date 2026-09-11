@@ -1527,6 +1527,7 @@ class SessionStorage:
         context_states: list[SessionContextState] | None = None,
         archived_entries: list[TranscriptEntry] | None = None,
         expected_message_ids: list[str] | None = None,
+        expected_epoch: int | None = None,
     ) -> None:
         """Atomically persist a compaction rewrite for one session."""
         node.session_key = canonicalize_session_key(node.session_key)
@@ -1534,10 +1535,13 @@ class SessionStorage:
 
         await self.conn.execute("BEGIN IMMEDIATE")
         try:
-            if expected_message_ids is not None:
+            if expected_message_ids is not None or expected_epoch is not None:
                 current_node = await self.get_session(node.session_key)
                 if current_node is None or current_node.session_id != node.session_id:
                     raise ValueError("Session changed before compaction could be saved")
+                if expected_epoch is not None and current_node.epoch != expected_epoch:
+                    raise ValueError("Session epoch changed before compaction could be saved")
+            if expected_message_ids is not None:
                 async with self.conn.execute(
                     "SELECT message_id FROM transcript_entries WHERE session_id = ? "
                     "ORDER BY created_at ASC, id ASC",

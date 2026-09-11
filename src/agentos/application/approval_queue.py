@@ -187,6 +187,13 @@ class ApprovalQueue:
             entry = self.get(approval_id)
             if entry.resolved:
                 return entry.approved
+
+        if time.time() - entry.created_at < self._timeout:
+            # The caller's own timeout elapsed, but the approval's overall
+            # lifespan (created_at + default_timeout) hasn't -- leave it
+            # pending instead of denying it, so a human operator can still
+            # resolve it after this bounded wait call returns.
+            return False
         return self._deny_on_timeout_if_unresolved(approval_id)
 
     def _deny_on_timeout_if_unresolved(self, approval_id: str) -> bool:

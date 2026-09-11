@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -60,8 +61,6 @@ _TRANSIENT_ERROR_PATTERNS = (
     "rate limit",
     "too many requests",
     "resource exhausted",
-    "429",
-    "529",
     "overload",
     "timeout",
     "timed out",
@@ -72,9 +71,6 @@ _TRANSIENT_ERROR_PATTERNS = (
     "service unavailable",
     "bad gateway",
     "gateway timeout",
-    "502",
-    "503",
-    "504",
     "cloudflare",
 )
 _PERMANENT_ERROR_PATTERNS = (
@@ -82,11 +78,29 @@ _PERMANENT_ERROR_PATTERNS = (
     "invalid api key",
     "invalid_api_key",
     "forbidden",
-    "401",
-    "403",
     "validation",
     "invalid request",
     "no handler registered",
+)
+# Bare status codes are matched as whole numbers rather than by plain
+# containment: "403" is a substring of the "4033" in "timed out after 4033ms",
+# and a permanent classification disables the job on its first failure with no
+# retry, so a duration that happens to contain an auth code must not read as
+# one. \b is not enough — "." is a non-word character, so it still reads
+# "12.403 seconds" as a 403 — hence an explicit digit-and-dot guard in front
+# and a digit guard behind. A trailing "." is deliberately still allowed, so a
+# code that ends a sentence ("got 403.") keeps matching, while a dot followed
+# by a letter is rejected so a script named report-403.sh does not disable its
+# own job (scripts.py interpolates path.name into the error text). Because the
+# guard is about digits rather than word characters it also still matches a
+# code glued to a name, like "http_403", which plain \b would have dropped.
+_TRANSIENT_ERROR_CODES = ("429", "529", "502", "503", "504")
+_PERMANENT_ERROR_CODES = ("401", "403")
+_TRANSIENT_ERROR_CODE_RE = re.compile(
+    rf"(?<![\d.])(?:{'|'.join(_TRANSIENT_ERROR_CODES)})(?!\d)(?!\.[A-Za-z])"
+)
+_PERMANENT_ERROR_CODE_RE = re.compile(
+    rf"(?<![\d.])(?:{'|'.join(_PERMANENT_ERROR_CODES)})(?!\d)(?!\.[A-Za-z])"
 )
 
 
@@ -100,12 +114,17 @@ def classify_error(error_text: str | None) -> str:
     if not error_text:
         return "transient"
     lowered = error_text.lower()
-    for pattern in _PERMANENT_ERROR_PATTERNS:
-        if pattern in lowered:
-            return "permanent"
-    for pattern in _TRANSIENT_ERROR_PATTERNS:
-        if pattern in lowered:
-            return "transient"
+    if any(pattern in lowered for pattern in _PERMANENT_ERROR_PATTERNS):
+        return "permanent"
+    if _PERMANENT_ERROR_CODE_RE.search(lowered):
+        return "permanent"
+    # Both transient checks are redundant with the default below and are kept,
+    # as the pattern loop already was before this change, so the taxonomy stays
+    # explicit and symmetric with the permanent side.
+    if any(pattern in lowered for pattern in _TRANSIENT_ERROR_PATTERNS):
+        return "transient"
+    if _TRANSIENT_ERROR_CODE_RE.search(lowered):
+        return "transient"
     return "transient"
 
 # Exponential backoff schedule for retryable jobs.

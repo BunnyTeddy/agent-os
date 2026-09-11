@@ -94,15 +94,30 @@ async def test_approval_queue_wait_same_process_event_fast_path(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_approval_queue_wait_preserves_timeout_denies(tmp_path) -> None:
+async def test_approval_queue_wait_denies_once_the_full_default_timeout_elapses(tmp_path) -> None:
+    db_path = tmp_path / "approval_queue.sqlite"
+    queue = ApprovalQueue(db_path=str(db_path), default_timeout=0.02, poll_interval=0.01)
+    approval_id = queue.request("exec", {"toolName": "exec_command", "command": "rm x"})
+    try:
+        assert await queue.wait(approval_id) is False
+        entry = queue.get(approval_id)
+        assert entry.resolved is True
+        assert entry.approved is False
+    finally:
+        queue.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_queue_wait_leaves_approval_pending_when_only_the_per_call_timeout_elapses(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "approval_queue.sqlite"
     queue = ApprovalQueue(db_path=str(db_path), default_timeout=1.0, poll_interval=0.01)
     approval_id = queue.request("exec", {"toolName": "exec_command", "command": "rm x"})
     try:
         assert await queue.wait(approval_id, timeout=0.02) is False
         entry = queue.get(approval_id)
-        assert entry.resolved is True
-        assert entry.approved is False
+        assert entry.resolved is False
     finally:
         queue.close()
 

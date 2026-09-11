@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +32,7 @@ from agentos.channels._util import (
     FloodStrikeBackoff,
     StreamThrottle,
     check_channel_file_size,
+    split_text_for_limit,
 )
 from agentos.channels.contract import (
     ChannelCapabilities,
@@ -208,9 +209,6 @@ class TelegramChannel:
     _dedupe: EventDedupeCache = field(init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
     _last_message_at: datetime | None = field(default=None, init=False, repr=False)
-    _known_sender_profiles: dict[str, dict[str, str]] = field(
-        default_factory=dict, init=False, repr=False
-    )
     bot_user_id: str | None = None
     bot_username: str | None = None
 
@@ -238,11 +236,6 @@ class TelegramChannel:
             "chat_id": str(message.channel_id or message.metadata.get("chat_id") or ""),
         }
 
-    def _remember_sender(self, message: IncomingMessage) -> None:
-        profile = self._sender_profile(message)
-        if profile["sender_id"]:
-            self._known_sender_profiles[profile["sender_id"]] = profile
-
     def record_access_denial(self, message: IncomingMessage, reason: str) -> None:
         """Create a durable pairing request for an unauthorized Telegram DM."""
         if reason != "not_paired" or bool(message.metadata.get("is_group")):
@@ -251,7 +244,6 @@ class TelegramChannel:
         sender_id = profile["sender_id"]
         if not sender_id:
             return
-        self._known_sender_profiles[sender_id] = profile
         try:
             result = self.pairing_store.request(
                 self.config.name,
@@ -705,7 +697,6 @@ class TelegramChannel:
         return payload
 
     def enqueue(self, message: IncomingMessage) -> None:
-        self._remember_sender(message)
         msg_id = str(message.metadata.get("message_id", ""))
         update_id = message.metadata.get("update_id")
         dedupe_key = f"{update_id}:{msg_id}" if update_id is not None else msg_id
@@ -1244,43 +1235,65 @@ class TelegramChannel:
 
     async def send(self, message: OutgoingMessage) -> dict[str, Any]:
         payload = self._build_send_payload(message)
-        try:
-            result = await self._api("sendMessage", payload)
-        except TelegramApiError as exc:
-            auto_rendered = "parse_mode" not in message.metadata
-            if not auto_rendered or "parse entities" not in str(exc).lower():
-                raise
-            log.warning("telegram.markdown_fallback", error=str(exc))
-            payload["text"] = message.content
-            payload.pop("parse_mode", None)
-            result = await self._api("sendMessage", payload)
+        auto_rendered = "parse_mode" not in message.metadata
+        segments = self._split_message_for_send(message.content, auto_rendered=auto_rendered)
+
+        result: dict[str, Any] = {}
+        for index, segment in enumerate(segments):
+            chunk_payload = dict(payload)
+            chunk_payload["text"] = render_telegram_html(segment) if auto_rendered else segment
+            if index > 0:
+                # A reply reference and any keyboard belong on the first
+                # message of a chunked reply, not on every continuation.
+                chunk_payload.pop("reply_parameters", None)
+                chunk_payload.pop("reply_markup", None)
+            try:
+                result = await self._api("sendMessage", chunk_payload)
+            except TelegramApiError as exc:
+                if not auto_rendered or "parse entities" not in str(exc).lower():
+                    raise
+                log.warning("telegram.markdown_fallback", error=str(exc))
+                chunk_payload["text"] = segment
+                chunk_payload.pop("parse_mode", None)
+                result = await self._api("sendMessage", chunk_payload)
         return result if isinstance(result, dict) else {"result": result}
 
     @staticmethod
-    def _split_for_limit(segment: str) -> tuple[str, str]:
+    def _split_message_for_send(content: str, *, auto_rendered: bool) -> list[str]:
+        """Split *content* into one message per Telegram's length cap.
+
+        Reuses ``_split_for_limit`` — the same primitive ``send_streaming``
+        already relies on — rather than a second splitter with its own,
+        possibly-diverging notion of where a message can safely be cut.
+        """
+        measure = None if auto_rendered else len
+        segments: list[str] = []
+        remaining = content
+        while True:
+            head, tail = TelegramChannel._split_for_limit(remaining, measure=measure)
+            segments.append(head)
+            if not tail:
+                return segments
+            remaining = tail
+
+    @staticmethod
+    def _split_for_limit(
+        segment: str,
+        *,
+        measure: Callable[[str], int] | None = None,
+    ) -> tuple[str, str]:
         """Split *segment* into the largest prefix that fits one message, plus the rest.
 
-        The 4096 budget applies to the *rendered* HTML, which is longer than the
-        markdown it came from, so the cut point is found by binary search over
-        the raw text and then nudged back to the nearest line/word boundary.
+        The 4096 budget applies to the *rendered* HTML by default, which is
+        longer than the markdown it came from. ``measure`` overrides what's
+        measured against the budget — callers that send raw text verbatim
+        (an explicit ``parse_mode``, where there is no HTML render step)
+        pass ``len`` directly so the cut reflects what Telegram will
+        actually receive. See :func:`split_text_for_limit` for the shared
+        cut-point and fenced-code-block logic.
         """
-        if len(render_telegram_html(segment)) <= _MESSAGE_TEXT_LIMIT:
-            return segment, ""
-        low, high, best = 1, len(segment) - 1, 1
-        while low <= high:
-            mid = (low + high) // 2
-            if len(render_telegram_html(segment[:mid])) <= _MESSAGE_TEXT_LIMIT:
-                best = mid
-                low = mid + 1
-            else:
-                high = mid - 1
-        cut = best
-        for boundary in ("\n", " "):
-            found = segment.rfind(boundary, 0, best)
-            if found >= best // 2:
-                cut = found + 1
-                break
-        return segment[:cut], segment[cut:]
+        length = measure if measure is not None else (lambda text: len(render_telegram_html(text)))
+        return split_text_for_limit(segment, _MESSAGE_TEXT_LIMIT, measure=length)
 
     async def _stream_send(
         self,

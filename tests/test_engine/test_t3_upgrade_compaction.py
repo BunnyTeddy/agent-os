@@ -23,6 +23,9 @@ class _FakeSessionManager:
         self._transcript = transcript or []
         self.compact_calls: list[tuple[str, int]] = []
 
+    async def get_session(self, session_key: str) -> SimpleNamespace:
+        return SimpleNamespace(session_id="test-session-id", epoch=0)
+
     async def get_transcript(self, session_key: str, **kwargs: Any) -> list[TranscriptEntry]:
         return list(self._transcript)
 

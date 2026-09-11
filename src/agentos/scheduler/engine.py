@@ -203,8 +203,7 @@ class SchedulerEngine:
                 reason=ReservationRejectionReason.NOT_FOUND.value,
                 error="Cron job not found",
             )
-        handler = self._timer._handlers.get(job.handler_key)
-        if handler is None:
+        if self._timer._handlers.get(job.handler_key) is None:
             return ManualRunResult(
                 status=ManualRunStatus.NO_HANDLER,
                 reason="no_handler",
@@ -219,6 +218,28 @@ class SchedulerEngine:
         )
         if isinstance(reservation, JobReservationRejected):
             return _manual_result_from_rejection(reservation)
+        # Run the row the reservation itself read, not the snapshot taken
+        # before it: an update landing between the two reads otherwise
+        # executes the payload, prompt or timeout the operator just replaced.
+        # ``timer._run_single`` already opens with ``reservation.job``.
+        job = reservation.job
+        handler = self._timer._handlers.get(job.handler_key)
+        if handler is None:
+            # The update could also have changed handler_key, so the handler
+            # has to be resolved again from the reserved row -- and the
+            # reservation released the way the timer path does.
+            error = f"No handler registered for key '{job.handler_key}'"
+            await self._store.finalize_reserved_missing_handler(
+                job.id,
+                reservation.token,
+                error=error,
+            )
+            return ManualRunResult(
+                status=ManualRunStatus.NO_HANDLER,
+                reason="no_handler",
+                error=error,
+                current_status=getattr(job.status, "value", str(job.status)),
+            )
         exe = await execute_with_timeout(job, handler)
         await self._store.save_execution(exe)
         await apply_reserved_result(job.id, reservation.token, exe, self._store)

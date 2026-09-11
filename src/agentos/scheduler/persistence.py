@@ -392,6 +392,71 @@ class _AsyncReentrantLock:
         self.release()
 
 
+#: Columns the reservation protocol owns. ``reserve_due_job`` claims a row with
+#: a lock-free atomic UPDATE, so a caller that read the row before that claim
+#: must not carry its pre-reservation snapshot of these back over it. Mirrors
+#: exactly what :func:`agentos.scheduler.types.clear_reservation` resets.
+_RESERVATION_COLUMNS: tuple[str, ...] = (
+    "reservation_token",
+    "reserved_at",
+    "reserved_by",
+    "reservation_source",
+    "scheduled_run_at",
+)
+
+#: Every other column an upsert may overwrite on conflict.
+_UPSERT_UPDATE_COLUMNS: tuple[str, ...] = (
+    "name",
+    "cron_expr",
+    "handler_key",
+    "payload",
+    "status",
+    "updated_at",
+    "last_run_at",
+    "next_run_at",
+    "run_count",
+    "error_count",
+    "last_error",
+    "max_retries",
+    "jitter_seconds",
+    "schedule_kind",
+    "schedule_raw",
+    "session_target",
+    "session_key",
+    "timeout_seconds",
+    "wake_mode",
+    "delete_after_run",
+    "enabled",
+    "backoff_until",
+    "consecutive_errors",
+    "delivery_json",
+    "origin_session_key",
+    "tool_policy_json",
+    "tz",
+    "anchor_at",
+    "creator_session_key",
+    "creator_sender_id",
+)
+
+
+def _build_upsert_update_clause(*, write_reservation: bool) -> str:
+    columns = _UPSERT_UPDATE_COLUMNS
+    if write_reservation:
+        columns = columns + _RESERVATION_COLUMNS
+    assignments = ",\n                ".join(f"{column}=excluded.{column}" for column in columns)
+    return f"            ON CONFLICT(id) DO UPDATE SET\n                {assignments}\n            "
+
+
+_UPSERT_CLAUSE_WITH_RESERVATION = _build_upsert_update_clause(write_reservation=True)
+_UPSERT_CLAUSE_KEEPING_RESERVATION = _build_upsert_update_clause(write_reservation=False)
+
+
+def _upsert_update_clause(write_reservation: bool) -> str:
+    if write_reservation:
+        return _UPSERT_CLAUSE_WITH_RESERVATION
+    return _UPSERT_CLAUSE_KEEPING_RESERVATION
+
+
 class JobStore:
     """Async SQLite store for CronJob records."""
 
@@ -534,7 +599,7 @@ class JobStore:
     def _iso(self, dt: datetime | None) -> str | None:
         return _storage_iso(dt)
 
-    async def _execute_save(self, job: CronJob) -> None:
+    async def _execute_save(self, job: CronJob, *, write_reservation: bool = True) -> None:
         handler_key, payload, session_target, session_key = normalize_contract(
             handler_key=job.handler_key,
             payload=job.payload,
@@ -560,43 +625,8 @@ class JobStore:
                  scheduled_run_at, tool_policy_json, tz, anchor_at,
                  creator_session_key, creator_sender_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name,
-                cron_expr=excluded.cron_expr,
-                handler_key=excluded.handler_key,
-                payload=excluded.payload,
-                status=excluded.status,
-                updated_at=excluded.updated_at,
-                last_run_at=excluded.last_run_at,
-                next_run_at=excluded.next_run_at,
-                run_count=excluded.run_count,
-                error_count=excluded.error_count,
-                last_error=excluded.last_error,
-                max_retries=excluded.max_retries,
-                jitter_seconds=excluded.jitter_seconds,
-                schedule_kind=excluded.schedule_kind,
-                schedule_raw=excluded.schedule_raw,
-                session_target=excluded.session_target,
-                session_key=excluded.session_key,
-                timeout_seconds=excluded.timeout_seconds,
-                wake_mode=excluded.wake_mode,
-                delete_after_run=excluded.delete_after_run,
-                enabled=excluded.enabled,
-                backoff_until=excluded.backoff_until,
-                consecutive_errors=excluded.consecutive_errors,
-                delivery_json=excluded.delivery_json,
-                origin_session_key=excluded.origin_session_key,
-                reservation_token=excluded.reservation_token,
-                reserved_at=excluded.reserved_at,
-                reserved_by=excluded.reserved_by,
-                reservation_source=excluded.reservation_source,
-                scheduled_run_at=excluded.scheduled_run_at,
-                tool_policy_json=excluded.tool_policy_json,
-                tz=excluded.tz,
-                anchor_at=excluded.anchor_at,
-                creator_session_key=excluded.creator_session_key,
-                creator_sender_id=excluded.creator_sender_id
-            """,
+            """
+            + _upsert_update_clause(write_reservation),
             (
                 job.id,
                 job.name,
@@ -638,15 +668,22 @@ class JobStore:
             ),
         )
 
-    async def save(self, job: CronJob) -> None:
+    async def save(self, job: CronJob, *, write_reservation: bool = True) -> None:
+        """Upsert *job*.
+
+        ``write_reservation=False`` leaves the reservation columns as they are
+        in the row. Callers that read-modify-write a whole job for an unrelated
+        edit must pass it, or an atomic reservation landing between their read
+        and their write is silently reverted (#1537).
+        """
         async with self._write_lock:
-            await self._execute_save(job)
+            await self._execute_save(job, write_reservation=write_reservation)
             if not self._in_transaction:
                 await self._db().commit()
 
-    async def save_no_commit(self, job: CronJob) -> None:
+    async def save_no_commit(self, job: CronJob, *, write_reservation: bool = True) -> None:
         """Insert/update a job without committing — use inside transaction()."""
-        await self._execute_save(job)
+        await self._execute_save(job, write_reservation=write_reservation)
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[JobStore]:

@@ -743,15 +743,19 @@ def _select_spreadsheet_sheets(
     if requested is None or requested == "":
         return sheets
 
+    requested_name = str(requested)
+    # A sheet literally named "1" has to win over the positional reading of
+    # "1". Testing the index first made every numeric sheet name unreachable
+    # and silently returned whichever sheet sat at that 1-based position.
+    for name, rows, total_rows in sheets:
+        if name == requested_name:
+            return [(name, rows, total_rows)]
+
     if isinstance(requested, int) or (isinstance(requested, str) and requested.isdigit()):
         index = int(requested) - 1
         if 0 <= index < len(sheets):
             return [sheets[index]]
 
-    requested_name = str(requested)
-    for name, rows, total_rows in sheets:
-        if name == requested_name:
-            return [(name, rows, total_rows)]
     for name, rows, total_rows in sheets:
         if name.lower() == requested_name.lower():
             return [(name, rows, total_rows)]

@@ -172,6 +172,8 @@ async def test_reset_same_key_archive_preserves_compacted_canonical_transcript(
     old_session_id = node.session_id
     for index in range(4):
         await manager.append_message("agent:main:main", "user", f"msg {index}", token_count=5)
+    source_session = await manager.get_session("agent:main:main")
+    assert source_session is not None
     await manager.persist_compaction_result(
         "agent:main:main",
         "short summary",
@@ -180,6 +182,8 @@ async def test_reset_same_key_archive_preserves_compacted_canonical_transcript(
         source_message_ids=[
             entry.message_id for entry in await manager.get_transcript("agent:main:main")
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
 
     canonical_before_reset = [
@@ -211,9 +215,12 @@ async def test_apply_intent_reset_same_key_missing_creates_session(manager):
 
 
 @pytest.mark.asyncio
-async def test_apply_intent_reset_same_key_archive_failure_does_not_block(
+async def test_apply_intent_reset_same_key_aborts_when_archive_write_fails(
     manager, tmp_path, monkeypatch
 ):
+    """Issue #1539: a write failure while archiving a non-empty session must
+    abort the reset rather than proceed to delete the only copy of the
+    transcript it was supposed to be backing up."""
     archive_file = tmp_path / "not-a-directory"
     archive_file.write_text("occupied", encoding="utf-8")
     monkeypatch.setenv("AGENTOS_SESSION_ARCHIVE_DIR", str(archive_file))
@@ -221,11 +228,53 @@ async def test_apply_intent_reset_same_key_archive_failure_does_not_block(
     old_session_id = node.session_id
     await manager.append_message("agent:main:main", "user", "hello")
 
+    with pytest.raises(RuntimeError, match="Failed to archive"):
+        await manager.apply_intent("agent:main:main", SessionIntent.RESET_SAME_KEY)
+
+    # Nothing was deleted and the session identity did not rotate.
+    assert await manager._storage.count_transcript_entries(old_session_id) == 1
+    unchanged = await manager.get_session("agent:main:main")
+    assert unchanged is not None
+    assert unchanged.session_id == old_session_id
+
+
+@pytest.mark.asyncio
+async def test_apply_intent_reset_same_key_empty_session_is_still_safe_to_rotate(
+    manager, tmp_path, monkeypatch
+):
+    """An empty session has nothing to archive -- that is not a write
+    failure, and must not be treated as one. The same broken archive
+    directory used above must not block a reset with nothing to back up."""
+    archive_file = tmp_path / "not-a-directory"
+    archive_file.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_SESSION_ARCHIVE_DIR", str(archive_file))
+    node = await manager.create("agent:main:main")
+    old_session_id = node.session_id
+
     applied, rotated = await manager.apply_intent("agent:main:main", SessionIntent.RESET_SAME_KEY)
 
     assert rotated is True
     assert applied.session_id != old_session_id
-    assert await manager._storage.count_transcript_entries(old_session_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_rotate_session_id_archive_only_tolerates_a_write_failure(
+    manager, tmp_path, monkeypatch
+):
+    """The non-destructive archive-only path never deletes anything, so a
+    failed backup there costs nothing but the backup -- it must keep its
+    existing best-effort behavior rather than start raising too."""
+    archive_file = tmp_path / "not-a-directory"
+    archive_file.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_SESSION_ARCHIVE_DIR", str(archive_file))
+    node = await manager.create("agent:main:main")
+    old_session_id = node.session_id
+    await manager.append_message("agent:main:main", "user", "hello")
+
+    rotated_node = await manager.rotate_session_id_archive_only("agent:main:main")
+
+    assert rotated_node.session_id != old_session_id
+    assert await manager._storage.count_transcript_entries(old_session_id) == 1
 
 
 @pytest.mark.asyncio
@@ -453,6 +502,8 @@ async def test_branch_fork_transcript_copies_compacted_archive(manager):
     await manager.create("agent:main:main")
     for index in range(4):
         await manager.append_message("agent:main:main", "user", f"msg {index}", token_count=5)
+    source_session = await manager.get_session("agent:main:main")
+    assert source_session is not None
     await manager.persist_compaction_result(
         "agent:main:main",
         "short summary",
@@ -462,6 +513,8 @@ async def test_branch_fork_transcript_copies_compacted_archive(manager):
         source_message_ids=[
             entry.message_id for entry in await manager.get_transcript("agent:main:main")
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
     parent_canonical = [
         entry.content for entry in await manager.get_canonical_transcript("agent:main:main")
@@ -1170,6 +1223,8 @@ async def test_persist_compaction_result_rewrite_failure_keeps_session_state_ato
     _fail_next_transcript_insert(monkeypatch, manager._storage)
 
     with pytest.raises(RuntimeError, match="rewrite insert failed"):
+        source_session = await manager.get_session("agent:main:main")
+        assert source_session is not None
         await manager.persist_compaction_result(
             "agent:main:main",
             "short summary",
@@ -1177,6 +1232,8 @@ async def test_persist_compaction_result_rewrite_failure_keeps_session_state_ato
             source_message_ids=[
                 entry.message_id for entry in await manager.get_transcript("agent:main:main")
             ],
+            source_session_id=source_session.session_id,
+            source_epoch=source_session.epoch,
         )
 
     assert await manager.get_transcript("agent:main:main") == original_transcript
@@ -1199,6 +1256,8 @@ async def test_persist_compaction_result_stores_summary_out_of_band(manager):
     for index in range(4):
         await manager.append_message("agent:main:main", "user", f"msg {index}", token_count=5)
 
+    source_session = await manager.get_session("agent:main:main")
+    assert source_session is not None
     await manager.persist_compaction_result(
         "agent:main:main",
         "short summary",
@@ -1208,6 +1267,8 @@ async def test_persist_compaction_result_stores_summary_out_of_band(manager):
         source_message_ids=[
             entry.message_id for entry in await manager.get_transcript("agent:main:main")
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
 
     transcript = await manager.get_transcript("agent:main:main")
@@ -1251,6 +1312,8 @@ async def test_delete_session_removes_compacted_transcript_archive(manager):
     for index in range(4):
         await manager.append_message("agent:main:main", "user", f"msg {index}", token_count=5)
 
+    source_session = await manager.get_session("agent:main:main")
+    assert source_session is not None
     await manager.persist_compaction_result(
         "agent:main:main",
         "short summary",
@@ -1258,6 +1321,8 @@ async def test_delete_session_removes_compacted_transcript_archive(manager):
         source_message_ids=[
             entry.message_id for entry in await manager.get_transcript("agent:main:main")
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
     assert len(await manager.get_canonical_transcript("agent:main:main")) == 4
 
@@ -1280,6 +1345,8 @@ async def test_persist_compaction_result_without_summary_does_not_rewrite_transc
     original_transcript = await manager.get_transcript("agent:main:main")
     original_node = await manager._storage.get_session("agent:main:main")
 
+    source_session = await manager.get_session("agent:main:main")
+    assert source_session is not None
     await manager.persist_compaction_result(
         "agent:main:main",
         "",
@@ -1287,6 +1354,8 @@ async def test_persist_compaction_result_without_summary_does_not_rewrite_transc
         source_message_ids=[
             entry.message_id for entry in await manager.get_transcript("agent:main:main")
         ],
+        source_session_id=source_session.session_id,
+        source_epoch=source_session.epoch,
     )
 
     assert await manager.get_transcript("agent:main:main") == original_transcript

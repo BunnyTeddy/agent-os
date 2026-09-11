@@ -6044,9 +6044,14 @@ class TurnRunner:
         if self._session_manager is None:
             return None
 
+        source_session = await self._session_manager.get_session(session_key)
+        if source_session is None:
+            raise KeyError(f"Session not found: {session_key}")
         transcript = await self._session_manager.get_transcript(session_key)
 
         agent.compaction_source_message_ids = [entry.message_id for entry in transcript]
+        agent.compaction_source_session_id = source_session.session_id
+        agent.compaction_source_epoch = source_session.epoch
 
         from agentos.engine.history import reconstruct_messages_from_entry
         from agentos.provider import Message

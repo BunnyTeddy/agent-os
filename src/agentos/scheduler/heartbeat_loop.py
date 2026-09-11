@@ -164,13 +164,13 @@ class HeartbeatLoop:
     async def _loop(self) -> None:
         while self._started:
             interval_ms = max(1, int(self._snapshot_cfg()["interval_ms"]))
-            self._nudge_event.clear()
             try:
                 await asyncio.wait_for(self._nudge_event.wait(), timeout=interval_ms / 1000.0)
             except TimeoutError:
                 pass
             except asyncio.CancelledError:
                 raise
+            self._nudge_event.clear()
 
             if not self._started:
                 break

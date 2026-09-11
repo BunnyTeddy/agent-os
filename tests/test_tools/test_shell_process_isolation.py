@@ -312,3 +312,13 @@ async def test_process_subagent_context_has_no_global_bypass() -> None:
         current_tool_context.reset(token)
 
     assert [session["session_id"] for session in payload["sessions"]] == ["own"]
+
+
+@pytest.mark.asyncio
+async def test_read_bg_output_handles_split_multibyte_utf8() -> None:
+    session = _session("utf8_split", "agent:main:one")
+    # '🎉' is b'\xf0\x9f\x8e\x89' (4 bytes) split across two 4096-byte chunk boundaries
+    fake_stdout = _FakeStdout([b"hello \xf0\x9f", b"\x8e\x89 world\n", b""])
+    session.process.stdout = fake_stdout  # type: ignore[assignment]
+    await shell._read_bg_output(session)
+    assert "".join(session.output_lines) == "hello 🎉 world\n"

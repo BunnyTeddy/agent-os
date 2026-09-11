@@ -38,6 +38,31 @@ class SessionDeltaTracker:
     def has_pending(self) -> bool:
         return self._pending_bytes > 0 or self._pending_messages > 0
 
+    def snapshot(self) -> tuple[int, int]:
+        """Return the currently pending ``(bytes, messages)`` counts.
+
+        ``sync()`` takes this at the top of the call and passes it to
+        :meth:`consume` at the end, rather than calling :meth:`reset`
+        directly. The gap between those two points contains real awaits
+        (file indexing, session indexing), during which concurrent
+        ``record()`` calls can add delta the sync in progress never
+        actually covered -- a plain ``reset()`` there would discard that
+        new activity along with the old.
+        """
+        return (self._pending_bytes, self._pending_messages)
+
+    def consume(self, snapshot: tuple[int, int]) -> None:
+        """Clear the delta that was already pending at a prior ``snapshot()``.
+
+        Subtracts rather than zeroes, so bytes or messages recorded after
+        the snapshot -- while the sync that took it was still running --
+        remain pending for the next trigger instead of being silently
+        dropped.
+        """
+        snap_bytes, snap_messages = snapshot
+        self._pending_bytes = max(0, self._pending_bytes - snap_bytes)
+        self._pending_messages = max(0, self._pending_messages - snap_messages)
+
     def reset(self) -> None:
         self._pending_bytes = 0
         self._pending_messages = 0
@@ -171,11 +196,13 @@ class MemorySyncManager:
         an unindexed file would keep its recorded mtime and never be
         rediscovered, and a failed delete would orphan SQLite chunks.
         """
+        if reason == "session-delta" and not self._delta.should_sync() and not force:
+            return
+
         is_search_reason = reason == "search" or reason.startswith("search:")
+        delta_snapshot = self._delta.snapshot()
         session_delta_pending = self._delta.has_pending()
         if is_search_reason and not self._dirty and not force and not session_delta_pending:
-            return
-        if reason == "session-delta" and not self._delta.should_sync() and not force:
             return
 
         logger.info("sync_manager.sync", reason=reason, force=force)
@@ -215,7 +242,7 @@ class MemorySyncManager:
         if reason == "session-delta" or (
             is_search_reason and session_delta_pending and not session_sync_failed
         ):
-            self._delta.reset()
+            self._delta.consume(delta_snapshot)
 
     async def warm_session(self, session_key: str) -> None:
         """Trigger 1: sync on first session access."""

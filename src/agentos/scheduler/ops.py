@@ -333,7 +333,7 @@ class SchedulerOps:
             job.next_run_at = _next_run(job, now)
 
         _resolve_script_placeholder(job)
-        await self._store.save(job)
+        await self._store.save(job, write_reservation=False)
         return job
 
     async def update(self, job_id: str, **patch) -> CronJob | None:
@@ -470,7 +470,7 @@ class SchedulerOps:
 
         job.updated_at = now
         _resolve_script_placeholder(job)
-        await self._store.save(job)
+        await self._store.save(job, write_reservation=False)
         return job
 
     async def remove(self, job_id: str) -> bool:
@@ -488,7 +488,7 @@ class SchedulerOps:
             return None
         job.status = JobStatus.PAUSED
         job.updated_at = datetime.now(UTC)
-        await self._store.save(job)
+        await self._store.save(job, write_reservation=False)
         return job
 
     async def resume(self, job_id: str) -> CronJob | None:
@@ -514,7 +514,7 @@ class SchedulerOps:
         else:
             job.next_run_at = _next_run(job, now)
 
-        await self._store.save(job)
+        await self._store.save(job, write_reservation=False)
         return job
 
     async def get(self, job_id: str) -> CronJob | None:

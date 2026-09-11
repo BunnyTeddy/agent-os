@@ -754,9 +754,13 @@ class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
         tracks_source = "source_message_ids" in params
         if tracks_source:
             source_message_ids = getattr(agent, "compaction_source_message_ids", None)
-            if source_message_ids is None:
+            source_session_id = getattr(agent, "compaction_source_session_id", None)
+            source_epoch = getattr(agent, "compaction_source_epoch", None)
+            if source_message_ids is None or source_session_id is None or source_epoch is None:
                 raise ValueError("Inline compaction requires a loaded transcript snapshot")
             persist_kwargs["source_message_ids"] = source_message_ids
+            persist_kwargs["source_session_id"] = source_session_id
+            persist_kwargs["source_epoch"] = source_epoch
         async with self._runner._session_write_context(session_key):
             retained_message_ids = await persist_method(
                 session_key,

@@ -468,3 +468,59 @@ def test_read_xlsx_sheets_reading_does_not_scale_with_sheet_count(tmp_path: Path
     # ratio on a shared, noisy CI box.
     assert twenty_sheets < 1.0
     assert twenty_sheets < max(one_sheet * 5, one_sheet + 0.5)
+
+
+def _single_cell_sheet_xml(text: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData>"
+        f'<row r="1"><c r="A1" t="inlineStr"><is><t>{text}</t></is></c></row>'
+        "</sheetData>"
+        "</worksheet>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_spreadsheet_reaches_a_sheet_named_like_an_index(tmp_path: Path) -> None:
+    """A workbook may name a sheet "1" (a year, a step, a code). Selecting it
+    by that name must return that sheet, not whichever sheet happens to sit
+    at 1-based position 1."""
+    target = tmp_path / "numeric-names.xlsx"
+    target.write_bytes(
+        _build_xlsx_bytes(
+            {
+                "Summary": _single_cell_sheet_xml("summary-cell"),
+                "1": _single_cell_sheet_xml("one-cell"),
+            }
+        )
+    )
+
+    with tool_context(tmp_path):
+        out = await fs.read_spreadsheet(str(target), sheet="1")
+
+    assert "one-cell" in out
+    assert "summary-cell" not in out
+
+
+@pytest.mark.asyncio
+async def test_read_spreadsheet_selects_by_position_when_no_sheet_has_that_name(
+    tmp_path: Path,
+) -> None:
+    """The positional reading of a numeric argument stays available -- it is
+    only outranked by an exact name match, never removed."""
+    target = tmp_path / "numeric-names.xlsx"
+    target.write_bytes(
+        _build_xlsx_bytes(
+            {
+                "Summary": _single_cell_sheet_xml("summary-cell"),
+                "1": _single_cell_sheet_xml("one-cell"),
+            }
+        )
+    )
+
+    with tool_context(tmp_path):
+        out = await fs.read_spreadsheet(str(target), sheet="2")
+
+    assert "one-cell" in out
+    assert "summary-cell" not in out
